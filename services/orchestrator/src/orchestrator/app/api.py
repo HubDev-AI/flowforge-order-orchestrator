@@ -1,8 +1,10 @@
 from datetime import timedelta
+from pathlib import Path
 from typing import Annotated
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from fastapi.responses import FileResponse
 
 from orchestrator.app.lifespan import Runtime
 from orchestrator.app.schemas import (
@@ -17,8 +19,10 @@ from orchestrator.domain.models import Order
 from orchestrator.domain.transitions import Submitted, transition
 
 MAX_IDEMPOTENCY_KEY_LENGTH = 255
+TIMELINE_PAGE = Path(__file__).resolve().parents[3] / "static" / "index.html"
 
 router = APIRouter(prefix="/api/orders")
+pages = APIRouter()
 
 
 def get_runtime(request: Request) -> Runtime:
@@ -83,3 +87,9 @@ async def get_order_status(order_id: str, runtime: RuntimeDep) -> OrderStatus:
     if order is None:
         raise HTTPException(status_code=404, detail="order not found")
     return to_status(order, await runtime.store.list_attempts(parsed))
+
+
+@pages.get("/", include_in_schema=False)
+@pages.get("/orders/{order_id}", include_in_schema=False)
+async def timeline_page() -> FileResponse:
+    return FileResponse(TIMELINE_PAGE)

@@ -20,4 +20,4 @@ uv run pytest -m contract  # real Postgres and RabbitMQ via testcontainers, need
 docker compose up -d --build --wait
 ```
 
-The pipeline is `config/pipeline.toml`.
+Open <http://localhost:8000> to submit an order and watch its timeline; the API lives under `/api/orders`. The pipeline is `config/pipeline.toml`.
