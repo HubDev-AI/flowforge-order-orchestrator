@@ -1,0 +1,4 @@
+services:
+  orchestrator:
+    volumes:
+      - ${E2E_PIPELINE_CONFIG:?set by the e2e fixtures}:/app/config/pipeline.toml:ro

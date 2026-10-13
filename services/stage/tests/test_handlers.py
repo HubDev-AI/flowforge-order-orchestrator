@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import pytest
 from contracts import Command, CommandKind
-from handlers import fraud, inventory, shipping
+from handlers import fraud, gift_wrap, inventory, shipping
 from main import UnknownStage, load_handler
 
 
@@ -58,18 +58,27 @@ async def test_shipping_creates_a_label_id_derived_from_the_order():
     assert str(order_id) in output["label_id"]
 
 
+async def test_gift_wrap_wraps_the_order():
+    order_id = uuid4()
+
+    output = await gift_wrap.Handler().execute(command("gift_wrap", order_id=order_id))
+
+    assert output == {"wrapped": True, "wrap_id": f"wrap-{order_id}"}
+
+
 @pytest.mark.parametrize("stage", [fraud, shipping])
 async def test_a_stage_without_an_undo_override_undoes_nothing(stage):
     assert await stage.Handler().undo(command("x", CommandKind.UNDO)) is None
 
 
 @pytest.mark.parametrize(
-    ("name", "module"), [("inventory", inventory), ("fraud", fraud), ("shipping", shipping)]
+    ("name", "module"),
+    [("inventory", inventory), ("fraud", fraud), ("shipping", shipping), ("gift_wrap", gift_wrap)],
 )
 def test_the_stage_name_selects_its_handler_module(name, module):
     assert isinstance(load_handler(name), module.Handler)
 
 
 def test_an_unknown_stage_name_fails_startup_with_a_clear_error():
-    with pytest.raises(UnknownStage, match="gift_wrap"):
-        load_handler("gift_wrap")
+    with pytest.raises(UnknownStage, match="engraving"):
+        load_handler("engraving")

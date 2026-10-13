@@ -1,8 +1,12 @@
+import logging
+
 from bus import MessageBus, consume_forever
 from contracts import Command, CommandKind, Outcome, Result, ScriptToken
 
 from stage_kit.handler import StageHandler
 from stage_kit.simulator import Simulator
+
+logger = logging.getLogger(__name__)
 
 SIMULATED_TRANSIENT = "simulated transient failure"
 SIMULATED_REJECTION = "simulated rejection"
@@ -19,6 +23,14 @@ class StageRunner:
 
     async def process(self, command: Command) -> Result:
         result = await self._outcome_of(command)
+        logger.info(
+            "order %s %s %s attempt %s: %s",
+            command.order_id,
+            command.stage,
+            command.kind,
+            command.attempt,
+            result.outcome,
+        )
         await self._bus.publish_result(result)
         return result
 

@@ -59,7 +59,7 @@ services:
     volumes:
       - ./config/pipeline.toml:/app/config/pipeline.toml:ro
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${ORCHESTRATOR_PORT:-8000}:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
       interval: 3s
