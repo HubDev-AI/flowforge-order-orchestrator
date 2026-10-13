@@ -6,7 +6,14 @@ from contracts import AttemptKey, Outcome, Result
 
 from orchestrator.app.clock import Clock
 from orchestrator.app.config import PipelineConfig
-from orchestrator.domain.transitions import Event, Rejected, Retry, Succeeded, transition
+from orchestrator.domain.transitions import (
+    Event,
+    Rejected,
+    Retry,
+    Succeeded,
+    TimedOut,
+    transition,
+)
 from orchestrator.ports.store import OrderStore
 
 logger = logging.getLogger(__name__)
@@ -47,9 +54,12 @@ class ResultsConsumer:
                 logger.warning("ignoring a %s result from stage %s", result.outcome, result.stage)
                 return False
         policy = self._config.policy_for(result.stage)
-        settled = await self._store.settle(
-            attempt, lambda order, _attempt: transition(order, event, policy)
-        )
+
+        def resolve(order, open_attempt):
+            late = open_attempt.deadline_at < now
+            return transition(order, TimedOut(attempt, now) if late else event, policy)
+
+        settled = await self._store.settle(attempt, resolve)
         if settled is None:
             return False
         self._nudge.set()
