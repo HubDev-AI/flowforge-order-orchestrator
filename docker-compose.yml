@@ -1,0 +1,89 @@
+x-rabbitmq-url: &rabbitmq-url amqp://flowforge:flowforge@rabbitmq:5672/
+
+x-stage: &stage
+  build:
+    context: .
+    dockerfile: services/stage/Dockerfile
+  image: flowforge-stage:dev
+  depends_on:
+    rabbitmq:
+      condition: service_healthy
+  environment: &stage-env
+    RABBITMQ_URL: *rabbitmq-url
+    STAGE_LATENCY_MIN_S: "0.1"
+    STAGE_LATENCY_MAX_S: "0.5"
+    STAGE_TRANSIENT_PROBABILITY: "0"
+    STAGE_REJECT_PROBABILITY: "0"
+
+services:
+  postgres:
+    image: postgres:18.6-alpine
+    environment:
+      POSTGRES_USER: flowforge
+      POSTGRES_PASSWORD: flowforge
+      POSTGRES_DB: flowforge
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flowforge -d flowforge"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  rabbitmq:
+    image: rabbitmq:4.3.6-management
+    environment:
+      RABBITMQ_DEFAULT_USER: flowforge
+      RABBITMQ_DEFAULT_PASS: flowforge
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: services/orchestrator/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      RABBITMQ_URL: *rabbitmq-url
+      DATABASE_URL: postgresql+asyncpg://flowforge:flowforge@postgres:5432/flowforge
+      PIPELINE_CONFIG: /app/config/pipeline.toml
+    volumes:
+      - ./config/pipeline.toml:/app/config/pipeline.toml:ro
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  stage-inventory:
+    <<: *stage
+    environment:
+      <<: *stage-env
+      STAGE_NAME: inventory
+
+  stage-fraud:
+    <<: *stage
+    environment:
+      <<: *stage-env
+      STAGE_NAME: fraud
+
+  stage-shipping:
+    <<: *stage
+    environment:
+      <<: *stage-env
+      STAGE_NAME: shipping
+
+volumes:
+  postgres-data:
+  rabbitmq-data:

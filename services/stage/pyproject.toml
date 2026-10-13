@@ -1,0 +1,11 @@
+[project]
+name = "flowforge-stage"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = ["flowforge-stage-kit"]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+flowforge-stage-kit = { workspace = true }

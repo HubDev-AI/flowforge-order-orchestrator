@@ -1,0 +1,16 @@
+[project]
+name = "flowforge-stage-kit"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = ["flowforge-contracts", "flowforge-bus", "pydantic-settings==2.15.0"]
+
+[build-system]
+requires = ["uv_build>=0.12.18,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "stage_kit"
+
+[tool.uv.sources]
+flowforge-contracts = { workspace = true }
+flowforge-bus = { workspace = true }
