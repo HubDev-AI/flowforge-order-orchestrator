@@ -1,0 +1,7 @@
+services:
+  stage-gift-wrap:
+    extends:
+      file: docker-compose.yml
+      service: stage-fraud
+    environment:
+      STAGE_NAME: gift_wrap
