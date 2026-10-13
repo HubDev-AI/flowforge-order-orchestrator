@@ -56,15 +56,17 @@ class Stack:
         command = ["docker", "compose", "-p", PROJECT]
         for file in files:
             command += ["-f", file]
-        return subprocess.run(
+        run = subprocess.run(
             [*command, *args],
             cwd=ROOT,
             env=self._env,
-            check=check,
             capture_output=True,
             text=True,
             timeout=900,
         )
+        if check and run.returncode:
+            raise RuntimeError(f"docker compose {' '.join(args)} failed:\n{run.stderr}")
+        return run
 
     def configure(self, stages=("inventory", "fraud", "shipping"), overrides=OVERRIDES) -> None:
         self.config_path.write_text(render_config(list(stages), overrides))
