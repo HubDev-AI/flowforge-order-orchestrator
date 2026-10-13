@@ -35,7 +35,7 @@ You need Docker with Compose v2. Nothing else is required to run the system.
 docker compose up -d --build --wait
 ```
 
-This builds two images (orchestrator and stage), starts Postgres, RabbitMQ, the orchestrator, and three stage services, applies the database migration, and returns once everything is healthy.
+This builds two images from one `Dockerfile` (the `orchestrator` and `stage` targets), starts Postgres, RabbitMQ, the orchestrator, and three stage services, applies the database migration, and returns once everything is healthy.
 
 - Timeline page: <http://localhost:8000>. Submit an order; you are redirected to its own URL and the page polls until the order finishes.
 - API: `http://localhost:8000/api/orders`.
@@ -72,14 +72,27 @@ The reasoning behind each choice, the alternatives that were rejected, and where
 |---|---|---|
 | The orchestrator owns the state machine and commands each stage over a broker | One place holds the rules, so history and status come for free | A single coordinator: one instance only, and the dispatcher is not safe to replicate |
 | A pure transition function; retries and timeouts only write rows | Every edge of the state diagram is a unit test, and a backoff survives a restart | Recovery is driven by polling, so it is only as fast as the sweep interval |
-| One sweep recovers both lost dispatches and silent stages, using a deadline on every command | One mechanism instead of an outbox plus a watchdog | A lost publish or a dead stage costs one attempt and one deadline window (10s by default) |
+| One sweep recovers both lost dispatches and silent stages, using a deadline on every command | One mechanism instead of an outbox plus a watchdog | A dead stage costs one attempt and one deadline window (10s by default). A command that could not be published is released at once and does not count: the order is simply due again at the next sweep |
 | RabbitMQ with acknowledge-before-handler, and no broker retries or dead-letter queue | A single retry authority, the orchestrator, so attempts are counted once | A stage that crashes mid-handler loses that command until its deadline fires |
 | An order row plus an append-only attempt log, in Postgres | The visible history is the log, and several containers can write safely | No event replay or time-travel; SQLite was rejected because it is not safe across processes |
 | An atomic store port: claim, time out, and settle each take a pure callback | An attempt row and its order update land together or not at all, so a crash cannot strand an order | The port is less obvious than separate calls, and the Postgres adapter must keep it in one transaction |
 | Undo hooks on every stage, defaulting to a no-op | The compensation path exists and is tested even though simulated stages have no side effects | Extra moving parts for work that is, today, simulated |
 | At-least-once delivery, idempotent handlers, and a guarded close of each attempt | A duplicate or late result is harmless and an outcome is applied once | Stage handlers must be idempotent per order and stage |
-| One stage image selected by `STAGE_NAME`; a stage list in TOML copied onto each order | Adding a stage is a handler, a Compose service, and a config line; in-flight orders are unaffected by config changes | An order already in flight keeps its old stage list until it finishes |
+| One stage image selected by `STAGE_NAME`; a stage list in TOML copied onto each order | Adding a stage is a handler, a Compose service, and a config line; in-flight orders are unaffected by config changes | An order already in flight keeps its old stage list until it finishes, so a removed stage's service must keep running until those orders are done; retry settings are read from the current config, not snapshotted |
 | A static timeline page with no build step | Nothing to install or build; the page is one file | No component framework, and browser behaviour is checked by hand, not in CI |
+
+### Consistency, concurrency, and load
+
+| Property | Guarantee | Ceiling |
+|---|---|---|
+| Delivery | At-least-once for commands and results (persistent messages, durable queues, publisher confirms). Settlement is effectively once: a guarded close applies one outcome per attempt, so a duplicate or late result is dropped | A stage that crashes mid-handler loses that command until its deadline; a duplicate command runs the handler twice, which is why handlers are idempotent per order and stage |
+| Durability | An attempt row and its order update commit in one transaction; a backoff is a due time on the row, so it survives a restart | Postgres is one node with a named volume; no replication |
+| Submission | Linearizable per idempotency key through a unique constraint; the losing concurrent insert re-reads and replays; SHA-256 of canonical JSON decides replay versus conflict | Replay returns the current state, not the original response; keys never expire; a body is at most 64 KiB and a script lists at most `max_attempts` tokens per stage and kind |
+| Status | One snapshot: the order and its attempts come from one query, so state and history never disagree | Read from the primary, polled once a second per open page |
+| Concurrency | One orchestrator process with two loops, serialized per order by row locks: claims use `FOR UPDATE SKIP LOCKED`, settlement a blocking `FOR UPDATE`, so a result waits for a concurrent timeout of its order and is then dropped as stale. Stages run concurrently across orders, strictly in sequence within one order | The results consumer handles one result at a time (prefetch 1), about 1 / settle latency per second. The dispatcher claims batches of 50 and ticks again at once while a batch is full. Stage services scale by adding replicas (competing consumers, no shared state); the orchestrator does not |
+| Load | The payload travels in every command, including undo commands | Bytes on the bus per order are payload x stages x attempts x 2 at worst, bounded by the body cap. History is append-only with no retention; per-order rows are bounded at stages x `max_attempts` x 2 |
+| Clocks | Deadlines are absolute times set by the orchestrator and compared on the stage's clock | Containers must share a clock; a skew larger than the 10 ms margin lets a scripted timeout succeed early |
+| Availability | Submission needs the database only; progress needs the broker too | Orders accepted during a broker outage wait; nothing counts against them until a command is actually sent |
 
 What is deliberately out of this version: more than one orchestrator instance, authentication, structured logs and metrics, a manual retry for terminal orders, and Redis and SQLite adapters. The full list is under "Limits" in the design record.
 
@@ -122,14 +135,15 @@ docs/                 brief, plan, research, design record, and the AI conversat
 
 ## AI assistants
 
-Three assistants were used, each for a different job. The conversation logs are in [`docs/conversations/`](docs/conversations/).
+Three tools were used across four jobs. The conversation logs are in [`docs/conversations/`](docs/conversations/) and the review reports in [`docs/reviews/`](docs/reviews/).
 
 | Job | Tool and model | What it did | Log |
 |---|---|---|---|
 | Brainstorming, architecture, plan | Claude Fable 5.1, high effort, in Claude Code | Turned the brief into requirements, ran research on the broker client, retry and sweep patterns, and flow gaps (notes in `docs/research/`), proposed options with trade-offs, and wrote the plan | [`session-d7e11c2d-…`](docs/conversations/session-d7e11c2d-84dc-4bb3-ad51-a24eb20940f8.md) |
 | Coding | Claude Sonnet 5.5, xhigh effort, in Claude Code | Implemented the plan one unit at a time, each in its own pull request, tests first where behaviour changed, checking that a test fails when the code it guards is broken. Looked up library docs (aio-pika, SQLAlchemy, Alembic, testcontainers) through Context7 rather than from memory, and drove Chrome to check the timeline page in light and dark mode and at phone width | [`session-69752424-…`](docs/conversations/session-69752424-d5e4-43b4-a438-da6a7eed3c45.md) |
-| Code review | Codex with GPT-6.1 Sol, high effort | An independent review of the pull requests by a different model, started after the build; its findings and the fixes they lead to land on top of the last pull request, and its log is added with them | added with the review fixes |
+| Code review | Claude Fable 5.1 in Claude Code (the `ce-code-review` skill, run inline) | Reviewed the twelve pull requests as one stack after the build: correctness, reliability, security, tests, and the consistency, concurrency, and load trade-offs; confirmed findings with probes and mutation tests. Twenty findings, each fixed in the review-fixes pull request or recorded as an accepted limit; the outcome of each is at the top of the report | [`2026-10-13-stack-review.md`](docs/reviews/2026-10-13-stack-review.md) |
+| Simplification review | ChatGPT (model as the author ran it; the report does not record it) | An independent read of the same stack by a different vendor, after the build: twelve behaviour-preserving cuts, each checked against library documentation through Context7, applied in the review-fixes pull request | [`2026-10-13-ponytail-stack-review.md`](docs/reviews/2026-10-13-ponytail-stack-review.md), [library evidence](docs/reviews/2026-10-13-ponytail-library-evidence.md) |
 
-The coding assistant also reviewed each unit before its pull request went up. That caught several real problems (an unbounded header, a consumer that could die silently, a result racing its own deadline), but it was the same model that wrote the code, which is why the independent review is a separate step.
+The coding assistant also reviewed each unit before its pull request went up. That caught several real problems (an unbounded header, a consumer that could die silently, a result racing its own deadline), but it was the same model that wrote the code, which is why the two reviews above are separate steps by a different model and a different vendor.
 
-**What I did.** I set the direction and the constraints and made the main architecture choices, which are marked as such in the plan: a config-ordered linear pipeline, compensation built now, an own orchestrator over a broker, RabbitMQ, one container per stage, and history through the status API and the page. I review and merge every pull request myself.
+**What I did.** I set the direction and the constraints and made the main architecture choices, which are marked as such in the plan: a config-ordered linear pipeline, compensation built now, an own orchestrator over a broker, RabbitMQ, one container per stage, and history through the status API and the page. I read both review reports, chose which findings to fix, and review and merge every pull request myself.
