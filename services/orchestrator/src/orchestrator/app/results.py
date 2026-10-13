@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from bus import MessageBus
+from bus import MessageBus, consume_forever
 from contracts import AttemptKey, Outcome, Result
 
 from orchestrator.app.clock import Clock
@@ -19,7 +19,6 @@ from orchestrator.ports.store import OrderStore
 logger = logging.getLogger(__name__)
 
 NO_REASON = "no reason given"
-CONSUMER_RESTART_DELAY_SECONDS = 1.0
 
 
 class ResultsConsumer:
@@ -66,13 +65,4 @@ class ResultsConsumer:
         return True
 
     async def run(self) -> None:
-        while True:
-            try:
-                async for result in self._bus.consume_results():
-                    try:
-                        await self.handle(result)
-                    except Exception:
-                        logger.exception("handling a result of order %s failed", result.order_id)
-            except Exception:
-                logger.exception("results consumer stopped; restarting")
-            await asyncio.sleep(CONSUMER_RESTART_DELAY_SECONDS)
+        await consume_forever(self._bus.consume_results, self.handle)
