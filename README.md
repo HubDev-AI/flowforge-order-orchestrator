@@ -57,7 +57,7 @@ uv run pytest -m contract                     # adapters against real Postgres a
 uv run pytest -m e2e                          # builds and drives the whole Compose stack
 ```
 
-The contract and end-to-end suites need Docker. The end-to-end suite runs its own Compose project, picks a free host port, and tears everything down afterwards; it takes a few minutes because it restarts services mid-order.
+CI (`.github/workflows/ci.yml`) runs lint and format checks on every pull request and the three test suites once a pull request is out of draft, so marking a draft ready for review starts them. The contract and end-to-end suites need Docker. The end-to-end suite runs its own Compose project, picks a free host port, and tears everything down afterwards; it takes a few minutes because it restarts services mid-order.
 
 ```text
 packages/contracts    messages, outcomes, and the outcome script shared by every service
