@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import aclosing
 from datetime import timedelta
 from uuid import UUID
 
@@ -92,11 +93,11 @@ async def client_for(clock):
         client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
         clients.append(client)
 
-        async def submit():
+        async def submit(key: str = "k1"):
             return await client.post(
                 "/api/orders",
                 json={"payload": {"sku": "A-1"}},
-                headers={"Idempotency-Key": "k1"},
+                headers={"Idempotency-Key": key},
             )
 
         return runtime, submit
@@ -130,12 +131,8 @@ def status(client):
 @pytest.fixture
 def next_command(runtime):
     async def pull(stage: str) -> Command:
-        consumer = runtime.bus.consume_commands(stage)
-        try:
-            async with asyncio.timeout(1):
-                return await anext(consumer)
-        finally:
-            await consumer.aclose()
+        async with aclosing(runtime.bus.consume_commands(stage)) as consumer, asyncio.timeout(1):
+            return await anext(consumer)
 
     return pull
 

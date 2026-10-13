@@ -1,3 +1,4 @@
+from contracts.clock import utc_now
 from contracts.messages import AttemptKey, Command, Result
 from contracts.outcomes import CommandKind, Outcome
 from contracts.script import OutcomeScript, ScriptToken
@@ -10,4 +11,5 @@ __all__ = [
     "OutcomeScript",
     "Result",
     "ScriptToken",
+    "utc_now",
 ]

@@ -1,8 +1,8 @@
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime
+
+from contracts import utc_now
 
 type Clock = Callable[[], datetime]
 
-
-def utc_now() -> datetime:
-    return datetime.now(UTC)
+__all__ = ["Clock", "utc_now"]

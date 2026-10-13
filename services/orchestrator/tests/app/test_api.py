@@ -1,6 +1,9 @@
 from uuid import UUID, uuid4
 
 from contracts import Outcome
+from orchestrator.app.main import MAX_BODY_BYTES
+
+from .conftest import pipeline_config
 
 
 async def test_submission_returns_the_order_id_and_the_initial_state(submit):
@@ -191,3 +194,89 @@ async def test_the_due_time_is_hidden_between_stages_and_shown_while_waiting_to_
     assert between_stages["current_stage"] == "fraud"
     assert between_stages["next_attempt_due_at"] is None
     assert waiting["next_attempt_due_at"] is not None
+
+
+def body_of(size: int) -> bytes:
+    prefix, suffix = b'{"payload": {"blob": "', b'"}}'
+    return prefix + b"x" * (size - len(prefix) - len(suffix)) + suffix
+
+
+async def test_a_body_at_the_cap_is_accepted_and_one_byte_more_is_rejected(client):
+    headers = {"Idempotency-Key": "k1", "Content-Type": "application/json"}
+
+    at_cap = await client.post("/api/orders", content=body_of(MAX_BODY_BYTES), headers=headers)
+    over = await client.post(
+        "/api/orders",
+        content=body_of(MAX_BODY_BYTES + 1),
+        headers=headers | {"Idempotency-Key": "k2"},
+    )
+
+    assert at_cap.status_code == 201
+    assert over.status_code == 413
+
+
+async def test_a_streamed_body_is_counted_as_it_arrives(client):
+    def stream(size):
+        async def chunks():
+            body = body_of(size)
+            for start in range(0, len(body), 4096):
+                yield body[start : start + 4096]
+
+        return chunks()
+
+    headers = {"Content-Type": "application/json"}
+    small = await client.post(
+        "/api/orders", content=stream(1024), headers=headers | {"Idempotency-Key": "k1"}
+    )
+    large = await client.post(
+        "/api/orders",
+        content=stream(MAX_BODY_BYTES + 1),
+        headers=headers | {"Idempotency-Key": "k2"},
+    )
+
+    assert small.status_code == 201
+    assert large.status_code == 413
+
+
+async def test_a_replay_is_answered_from_the_stored_order_after_the_config_tightens(
+    submit, runtime
+):
+    script = {"fraud": {"execute": ["retry", "retry", "succeed"]}}
+    first = await submit(script=script)
+    runtime.config = pipeline_config(["inventory", "shipping"])
+
+    replay = await submit(script=script)
+    changed = await submit(script={"fraud": {"execute": ["reject"]}})
+
+    assert (first.status_code, replay.status_code) == (201, 200)
+    assert replay.json()["id"] == first.json()["id"]
+    assert changed.status_code == 409
+
+
+async def test_a_replay_survives_a_lower_attempt_cap(submit, runtime):
+    script = {"fraud": {"execute": ["retry", "retry", "succeed"]}}
+    first = await submit(script=script)
+    tightened = runtime.config.model_dump()
+    tightened["defaults"]["max_attempts"] = 1
+    runtime.config = type(runtime.config).model_validate(tightened)
+
+    replay = await submit(script=script)
+    fresh = await submit(script=script, key="k2")
+
+    assert replay.status_code == 200
+    assert replay.json()["id"] == first.json()["id"]
+    assert fresh.status_code == 422
+
+
+async def test_a_script_longer_than_the_attempt_cap_is_rejected(submit):
+    response = await submit(script={"fraud": {"execute": ["retry"] * 4}})
+
+    assert response.status_code == 422
+    assert "4 execute tokens for fraud" in response.json()["detail"]
+    assert "3 attempts" in response.json()["detail"]
+
+
+async def test_a_script_as_long_as_the_attempt_cap_is_accepted(submit):
+    response = await submit(script={"fraud": {"execute": ["retry"] * 3}})
+
+    assert response.status_code == 201

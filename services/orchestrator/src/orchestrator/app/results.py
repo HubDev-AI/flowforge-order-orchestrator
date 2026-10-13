@@ -2,7 +2,7 @@ import asyncio
 import logging
 
 from bus import MessageBus, consume_forever
-from contracts import AttemptKey, Outcome, Result
+from contracts import Outcome, Result
 
 from orchestrator.app.clock import Clock
 from orchestrator.app.config import PipelineConfig
@@ -38,17 +38,14 @@ class ResultsConsumer:
 
     async def handle(self, result: Result) -> bool:
         now = self._clock()
-        attempt = AttemptKey(
-            order_id=result.order_id, stage=result.stage, attempt=result.attempt, kind=result.kind
-        )
         event: Event
         match result.outcome:
             case Outcome.SUCCEEDED:
-                event = Succeeded(attempt, now, result.stage_output)
+                event = Succeeded(result, now, result.stage_output)
             case Outcome.RETRY:
-                event = Retry(attempt, now, result.reason or NO_REASON)
+                event = Retry(result, now, result.reason or NO_REASON)
             case Outcome.REJECTED:
-                event = Rejected(attempt, now, result.reason or NO_REASON)
+                event = Rejected(result, now, result.reason or NO_REASON)
             case _:
                 logger.warning("ignoring a %s result from stage %s", result.outcome, result.stage)
                 return False
@@ -56,9 +53,9 @@ class ResultsConsumer:
 
         def resolve(order, open_attempt):
             late = open_attempt.deadline_at < now
-            return transition(order, TimedOut(attempt, now) if late else event, policy)
+            return transition(order, TimedOut(result, now) if late else event, policy)
 
-        settled = await self._store.settle(attempt, resolve)
+        settled = await self._store.settle(result, resolve)
         if settled is None:
             return False
         self._nudge.set()

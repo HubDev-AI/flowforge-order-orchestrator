@@ -4,6 +4,7 @@ from datetime import timedelta
 import pytest
 import sqlalchemy as sa
 from orchestrator.adapters.postgres_store import PostgresStore, orders
+from orchestrator.domain.models import OrderState
 from orchestrator.domain.transitions import Succeeded, TimedOut, transition
 
 pytestmark = pytest.mark.contract
@@ -65,3 +66,25 @@ async def test_an_attempt_without_stage_output_stores_sql_null(
     await engine.dispose()
 
     assert nulls == 1
+
+
+async def test_settle_waits_for_a_held_order_lock_instead_of_skipping_it(
+    fresh_postgres, make_order, dispatch, settle_with, now
+):
+    engine = await fresh_postgres()
+    store = PostgresStore(engine)
+    order = make_order(stages=("inventory",))
+    await store.create_order(order)
+    [claim] = await store.claim_due(now, 10, dispatch)
+    succeed = settle_with(lambda a: Succeeded(a.key, now))
+
+    async with engine.begin() as holder:
+        await holder.execute(sa.select(orders).where(orders.c.id == order.id).with_for_update())
+        settling = asyncio.create_task(store.settle(claim.attempt.key, succeed))
+        await asyncio.sleep(0.5)
+        assert not settling.done()
+
+    async with asyncio.timeout(5):
+        settled = await settling
+    assert settled.state is OrderState.COMPLETED
+    await engine.dispose()

@@ -183,6 +183,7 @@
   }
 
   function showSubmitForm() {
+    let pending = null;
     $("submit-view").hidden = false;
     $("submit-form").addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -198,16 +199,18 @@
         error.hidden = false;
         return;
       }
+      const body = JSON.stringify(request);
+      if (!pending || pending.body !== body) pending = { body, key: newIdempotencyKey() };
       $("submit-button").disabled = true;
       try {
         const response = await fetch("/api/orders", {
           method: "POST",
-          headers: { "Content-Type": "application/json", "Idempotency-Key": newIdempotencyKey() },
-          body: JSON.stringify(request),
+          headers: { "Content-Type": "application/json", "Idempotency-Key": pending.key },
+          body,
         });
-        const body = await response.json();
-        if (!response.ok) throw new Error(describeError(body));
-        location.assign(`/orders/${body.id}`);
+        const reply = await response.json();
+        if (!response.ok) throw new Error(describeError(reply));
+        location.assign(`/orders/${reply.id}`);
       } catch (failure) {
         error.textContent = failure.message || "Could not reach the server.";
         error.hidden = false;
@@ -226,43 +229,26 @@
 
   function attemptItem(attempt) {
     const inProgress = !attempt.finished_at;
-    const item = document.createElement("li");
-    item.className = `attempt kind-${attempt.kind} ` +
-      (inProgress ? "in-progress" : `outcome-${attempt.outcome}`);
+    const item = textElement("li", `attempt kind-${attempt.kind} ` +
+      (inProgress ? "in-progress" : `outcome-${attempt.outcome}`), "");
 
-    const title = document.createElement("div");
-    title.className = "attempt-title";
-    const stage = document.createElement("span");
-    stage.textContent = attempt.stage;
-    title.append(stage, tag("tag tag-kind", attempt.kind),
-      tag("tag", `attempt ${attempt.attempt}`),
-      tag("tag tag-outcome", inProgress ? "in progress" : label(attempt.outcome)));
-    item.append(title);
-
-    const times = document.createElement("p");
-    times.className = "meta";
-    times.textContent = inProgress
+    const title = textElement("div", "attempt-title", "");
+    title.append(textElement("span", "", attempt.stage),
+      textElement("span", "tag tag-kind", attempt.kind),
+      textElement("span", "tag", `attempt ${attempt.attempt}`),
+      textElement("span", "tag tag-outcome", inProgress ? "in progress" : label(attempt.outcome)));
+    item.append(title, textElement("p", "meta", inProgress
       ? `started ${formatTime(attempt.started_at)}`
-      : `${formatTime(attempt.started_at)} to ${formatTime(attempt.finished_at)}`;
-    item.append(times);
-
-    if (attempt.reason) {
-      const reason = document.createElement("p");
-      reason.className = "meta";
-      reason.textContent = attempt.reason;
-      item.append(reason);
-    }
+      : `${formatTime(attempt.started_at)} to ${formatTime(attempt.finished_at)}`));
+    if (attempt.reason) item.append(textElement("p", "meta", attempt.reason));
     if (attempt.stage_output) {
-      const output = document.createElement("p");
-      output.className = "output";
-      output.textContent = JSON.stringify(attempt.stage_output);
-      item.append(output);
+      item.append(textElement("p", "output", JSON.stringify(attempt.stage_output)));
     }
     return item;
   }
 
-  function tag(className, text) {
-    const element = document.createElement("span");
+  function textElement(name, className, text) {
+    const element = document.createElement(name);
     element.className = className;
     element.textContent = text;
     return element;
