@@ -1,9 +1,9 @@
+import asyncio
 from dataclasses import replace
 from datetime import timedelta
 
 import pytest
 from contracts import CommandKind, Outcome
-from orchestrator.adapters.memory_store import MemoryStore
 from orchestrator.domain.errors import DuplicateIdempotencyKey
 from orchestrator.domain.models import Decision, Dispatch, NewAttempt, OrderState
 from orchestrator.domain.transitions import (
@@ -14,24 +14,6 @@ from orchestrator.domain.transitions import (
     plan_dispatch,
     transition,
 )
-
-
-@pytest.fixture
-def store():
-    return MemoryStore()
-
-
-@pytest.fixture
-def dispatch(now, policy):
-    return lambda order: plan_dispatch(order, now, lambda stage: policy)
-
-
-@pytest.fixture
-def settle_with(policy):
-    def build(event_for):
-        return lambda order, attempt: transition(order, event_for(attempt), policy)
-
-    return build
 
 
 async def test_created_order_is_returned_intact(store, make_order):
@@ -108,6 +90,18 @@ async def test_order_with_an_open_attempt_is_not_claimable_even_when_due(store, 
 
     assert await store.claim_due(now, 10, keep_due) == []
     assert len(await store.list_attempts(order.id)) == 1
+
+
+async def test_concurrent_claims_of_one_due_order_yield_a_single_claim(
+    store, make_order, dispatch, now
+):
+    await store.create_order(make_order())
+
+    claims = await asyncio.gather(
+        store.claim_due(now, 10, dispatch), store.claim_due(now, 10, dispatch)
+    )
+
+    assert sorted(len(batch) for batch in claims) == [0, 1]
 
 
 async def test_claim_limit_leaves_the_rest_claimable(store, make_order, dispatch, now):
