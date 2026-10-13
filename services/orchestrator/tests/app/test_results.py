@@ -48,6 +48,22 @@ async def test_a_settled_result_wakes_the_dispatcher_and_a_stale_one_does_not(
     assert not runtime.nudge.is_set()
 
 
+async def test_a_result_after_its_deadline_counts_as_a_timeout_before_the_sweep_runs(
+    submit, dispatcher, results, next_command, reply, clock, history, status
+):
+    order = (await submit()).json()
+    await dispatcher.tick()
+    command = await next_command("inventory")
+    clock.advance(11)
+
+    assert await results.handle(reply(command)) is True
+
+    assert await history(order["id"]) == [("inventory", "execute", 1, "timed_out")]
+    body = await status(order["id"])
+    assert (body["state"], body["current_stage"]) == ("running", "inventory")
+    assert body["next_attempt_due_at"] is not None
+
+
 async def test_a_stage_output_is_kept_on_its_attempt(
     submit, dispatcher, results, next_command, reply, status
 ):
