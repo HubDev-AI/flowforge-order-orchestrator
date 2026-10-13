@@ -185,6 +185,9 @@
   function showSubmitForm() {
     let pending = null;
     $("submit-view").hidden = false;
+    window.addEventListener("pageshow", () => {
+      $("submit-button").disabled = false;
+    });
     $("submit-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       const error = $("submit-error");
@@ -210,6 +213,7 @@
         });
         const reply = await response.json();
         if (!response.ok) throw new Error(describeError(reply));
+        pending = null;
         location.assign(`/orders/${reply.id}`);
       } catch (failure) {
         error.textContent = failure.message || "Could not reach the server.";
