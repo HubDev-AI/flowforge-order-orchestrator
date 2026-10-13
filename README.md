@@ -122,9 +122,14 @@ docs/                 brief, plan, research, design record, and the AI conversat
 
 ## AI assistants
 
-The whole project was built with Claude (Anthropic) through Claude Code, and the conversation logs are in [`docs/conversations/`](docs/conversations/): one session for planning, one for the build.
+Three assistants were used, each for a different job. The conversation logs are in [`docs/conversations/`](docs/conversations/).
 
-- **Planning.** The assistant turned the brief into requirements and a plan: it ran research on the broker client, retry and sweep patterns, and flow gaps (the notes are in `docs/research/`), proposed options with trade-offs, and wrote the plan. The scope and the main architecture choices (a config-ordered linear pipeline, compensation built now, an own orchestrator over a broker, RabbitMQ, one container per stage, history through the status API and the page) were made by me and are marked as such in the plan.
-- **Build.** The assistant implemented the plan one unit at a time, each in its own pull request, writing the tests first where behaviour changed and checking that a test fails when the code it guards is broken. It looked up library documentation (aio-pika, SQLAlchemy, Alembic, testcontainers) through Context7 rather than from memory, and drove Chrome to check the timeline page in light and dark mode and at phone width.
-- **Review.** Each unit was reviewed by the assistant before its pull request went up, which caught several real problems (an unbounded header, a consumer that could die silently, a result racing its own deadline). That was a single reviewer, not an independent one, so the pull requests are where a human review happens.
-- **What I did.** I set the direction and the constraints, chose the decisions above, and review and merge every pull request myself.
+| Job | Tool and model | What it did | Log |
+|---|---|---|---|
+| Brainstorming, architecture, plan | Claude Fable 5.1, high effort, in Claude Code | Turned the brief into requirements, ran research on the broker client, retry and sweep patterns, and flow gaps (notes in `docs/research/`), proposed options with trade-offs, and wrote the plan | [`session-d7e11c2d-…`](docs/conversations/session-d7e11c2d-84dc-4bb3-ad51-a24eb20940f8.md) |
+| Coding | Claude Sonnet 5.5, xhigh effort, in Claude Code | Implemented the plan one unit at a time, each in its own pull request, tests first where behaviour changed, checking that a test fails when the code it guards is broken. Looked up library docs (aio-pika, SQLAlchemy, Alembic, testcontainers) through Context7 rather than from memory, and drove Chrome to check the timeline page in light and dark mode and at phone width | [`session-69752424-…`](docs/conversations/session-69752424-d5e4-43b4-a438-da6a7eed3c45.md) |
+| Code review | Codex with GPT-6.1 Sol, high effort | An independent review of the pull requests by a different model, started after the build; its findings and the fixes they lead to land on top of the last pull request, and its log is added with them | added with the review fixes |
+
+The coding assistant also reviewed each unit before its pull request went up. That caught several real problems (an unbounded header, a consumer that could die silently, a result racing its own deadline), but it was the same model that wrote the code, which is why the independent review is a separate step.
+
+**What I did.** I set the direction and the constraints and made the main architecture choices, which are marked as such in the plan: a config-ordered linear pipeline, compensation built now, an own orchestrator over a broker, RabbitMQ, one container per stage, and history through the status API and the page. I review and merge every pull request myself.
