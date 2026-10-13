@@ -154,3 +154,13 @@ async def test_the_loop_publishes_a_result_for_every_command_it_consumes():
 
     assert [r.attempt for r in received] == [1, 2]
     assert all(r.outcome is Outcome.SUCCEEDED for r in received)
+
+
+async def test_every_processed_command_is_logged_with_its_identity_and_outcome(caplog):
+    handler = RecordingHandler(output={"score": 0.1})
+    sent = command(attempt=3)
+
+    with caplog.at_level("INFO"):
+        await runner(handler, await make_bus()).process(sent)
+
+    assert f"order {sent.order_id} fraud execute attempt 3: succeeded" in caplog.text
