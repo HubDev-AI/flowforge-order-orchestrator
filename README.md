@@ -29,40 +29,154 @@ An order's life: submit (`pending`), the dispatcher claims it and publishes the 
 
 ## Build and run
 
-You need Docker with Compose v2. Nothing else is required to run the system.
+You need Docker with Compose v2. Nothing else is required to run the system. Run every command from the repository root.
+
+### 1. Start the stack
+
+Pick the host port first. The orchestrator uses `8000` unless you choose another one; check that it is free with `lsof -i :8000` (no output means free).
 
 ```sh
+export PORT=8000                      # or any free port, e.g. 18000
+export ORCHESTRATOR_PORT=$PORT        # Compose publishes the orchestrator on this port
+export API=http://localhost:$PORT/api/orders
+
 docker compose up -d --build --wait
 ```
 
-This builds two images from one `Dockerfile` (the `orchestrator` and `stage` targets), starts Postgres, RabbitMQ, the orchestrator, and three stage services, applies the database migration, and returns once everything is healthy.
-
-- Timeline page: <http://localhost:8000>. Submit an order; you are redirected to its own URL and the page polls until the order finishes.
-- API: `http://localhost:8000/api/orders`.
-- If port 8000 is taken, set `ORCHESTRATOR_PORT` first (`ORCHESTRATOR_PORT=18000 docker compose up -d --build --wait`).
-- Stage logs show one line per processed command: `docker compose logs -f stage-fraud`.
-- Stop with `docker compose down`. Data survives in named volumes; `docker compose down -v` wipes it.
-
-### Try the API
+The first build takes a minute or two. The command returns when every container is up and the orchestrator answers. Check it:
 
 ```sh
-curl -s -X POST localhost:8000/api/orders \
-  -H 'Content-Type: application/json' -H 'Idempotency-Key: demo-1' \
-  -d '{"payload": {"sku": "A-1"}}'
-# {"id": "…", "state": "pending"}   (201; the same key and payload again returns 200)
-
-curl -s localhost:8000/api/orders/<id>    # state, current stage, and every attempt so far
+docker compose ps
 ```
 
-Add an outcome script to force what the stages do, per stage, kind, and attempt (`succeed`, `retry`, `reject`, `timeout`; an attempt the script leaves unlisted succeeds):
+Expected: six services running (`postgres`, `rabbitmq`, `orchestrator`, `stage-inventory`, `stage-fraud`, `stage-shipping`), and the orchestrator `healthy` with `127.0.0.1:<PORT>->8000/tcp`. The database migration runs automatically when the orchestrator starts.
+
+### 2. Use the timeline page
+
+1. Open `http://localhost:<PORT>` in a browser (<http://localhost:8000> by default).
+2. Leave **Order payload** as it is, or put any JSON object there; it is the order data the stages receive.
+3. Leave **Outcome script** empty for a normal run, or paste one of the scripts from the table below.
+4. Click **Submit order**. The page moves to the order's own address, `/orders/<id>`, and refreshes once a second until the order finishes.
+5. To submit another order, click **FlowForge** at the top left, or use the browser's Back button.
+
+Each attempt is one card. Green means succeeded; amber, retry or timed out; red, rejected or exhausted; a pulsing **in progress** tag means the stage is still working; a purple tint marks an undo. A banner says when the order is waiting out a backoff before the next attempt, and a notice says when the page cannot reach the server; it keeps the last timeline and retries.
+
+The outcome script forces what a stage does, by stage, by kind (`execute` or `undo`), and by attempt number, so you can see every path on demand. Tokens are `succeed`, `retry`, `reject`, and `timeout`. Attempts the script does not list succeed; stages it does not name behave normally.
+
+| Outcome script | What you should see |
+|---|---|
+| *(empty)* | inventory, fraud, and shipping succeed; `completed` in about a second |
+| `{"fraud": {"execute": ["retry", "retry", "succeed"]}}` | two amber `retry` cards for fraud, the retry banner between them (1 s, then 2 s), then `completed` |
+| `{"fraud": {"execute": ["reject"]}}` | fraud `rejected`, then undo cards for fraud and then inventory; ends `failed`, with the reason under the state |
+| `{"inventory": {"execute": ["retry", "retry", "retry"]}}` | inventory attempt 3 `exhausted`, then an undo of inventory; ends `failed` |
+| `{"fraud": {"execute": ["reject"]}, "inventory": {"undo": ["retry", "retry", "retry"]}}` | the inventory undo itself gives up; ends `compensation_failed` |
+| `{"fraud": {"execute": ["timeout"]}}` | fraud stays **in progress** for its 10 s deadline, turns `timed out`, then attempt 2 succeeds; `completed` |
+
+A script that names an unknown stage, or lists more tokens than a stage has attempts (3 by default), is rejected and the reason appears under the form.
+
+### 3. Use the API
+
+Submit an order. `Idempotency-Key` is required; use a new value for every new order.
+
+```sh
+curl -s -X POST $API -H 'Content-Type: application/json' -H 'Idempotency-Key: demo-1' \
+  -d '{"payload": {"sku": "A-1"}, "script": {"fraud": {"execute": ["retry", "succeed"]}}}'
+```
+
+Expected, with status `201`:
 
 ```json
-{"payload": {"sku": "A-1"},
- "script": {"fraud": {"execute": ["retry", "retry", "succeed"]},
-            "inventory": {"undo": ["retry"]}}}
+{"id": "6eb55f60-e5dd-4e5d-8303-16c9e20826b0", "state": "pending"}
 ```
 
-The page has a field for the same script. Some useful ones: `{"fraud": {"execute": ["reject"]}}` shows compensation, `{"fraud": {"execute": ["timeout"]}}` shows a missed deadline and the retry that follows.
+Read its status and full history, using the `id` from that response:
+
+```sh
+curl -s $API/6eb55f60-e5dd-4e5d-8303-16c9e20826b0
+```
+
+Expected, a second or two later:
+
+```json
+{"id": "6eb55f60-…", "state": "completed", "current_stage": null,
+ "next_attempt_due_at": null, "terminal_reason": null,
+ "attempts": [
+   {"stage": "inventory", "kind": "execute", "attempt": 1, "outcome": "succeeded", "stage_output": {"reservation_id": "res-…"}, ...},
+   {"stage": "fraud", "kind": "execute", "attempt": 1, "outcome": "retry", "reason": "simulated transient failure", ...},
+   {"stage": "fraud", "kind": "execute", "attempt": 2, "outcome": "succeeded", ...},
+   {"stage": "shipping", "kind": "execute", "attempt": 1, "outcome": "succeeded", ...}]}
+```
+
+| You send | You get |
+|---|---|
+| the same `Idempotency-Key` and the same body again | `200` and the same order, no new work |
+| the same `Idempotency-Key` with a different body | `409` |
+| no `Idempotency-Key` header, or a script with an unknown stage | `422` with the reason |
+| a body larger than 64 KiB | `413` |
+| `GET` for an id that does not exist | `404` |
+
+### 4. See it recover
+
+**A stage that is down.** Its commands wait in the queue, each attempt times out after 10 s and is retried, and when the stage comes back it drops the stale commands and runs only the live one.
+
+1. Stop the fraud stage:
+   ```sh
+   docker compose stop stage-fraud
+   ```
+2. Submit an order on the page, or with:
+   ```sh
+   curl -s -X POST $API -H 'Content-Type: application/json' \
+     -H "Idempotency-Key: $(uuidgen)" -d '{"payload": {"sku": "A-1"}}'
+   ```
+3. Watch the order page. Fraud attempt 1 is **in progress** for 10 s, then `timed out`. Wait until fraud attempt 2 shows **in progress** (about 12 s after submitting).
+4. Start the stage again:
+   ```sh
+   docker compose start stage-fraud
+   ```
+5. Expected: the order ends `completed`, with fraud `timed out` then `succeeded`. The stage's log for that order shows the dropped command and the one it ran:
+   ```sh
+   docker compose logs --no-log-prefix stage-fraud | grep <id>
+   ```
+   ```text
+   INFO:bus.port:dropped expired execute of order <id> fraud attempt 1
+   INFO:stage_kit.runner:order <id> fraud execute attempt 2: succeeded
+   ```
+
+If you start the stage only after the third attempt has timed out, fraud is `exhausted` instead: the order compensates (undo of fraud, then inventory) and ends `failed`. That is the attempt cap working.
+
+**The orchestrator restarting.** Submit the `timeout` script from the table, and while fraud is **in progress** run:
+
+```sh
+docker compose restart orchestrator
+```
+
+Expected: the page shows the connection notice for a few seconds, then carries on; the order ends `completed`. Orders live in Postgres, so nothing is lost.
+
+### 5. Look inside
+
+```sh
+docker compose logs -f orchestrator stage-inventory stage-fraud stage-shipping   # live logs
+docker compose exec rabbitmq rabbitmqctl list_queues name messages consumers     # one queue per stage, plus results
+docker compose exec postgres psql -U flowforge -d flowforge \
+  -c "select state, count(*) from orders group by state"                         # orders by state
+```
+
+Each stage logs one line per command it ran (`order <id> <stage> <kind> attempt <n>: <outcome>`) or dropped as expired.
+
+### 6. Stop
+
+```sh
+docker compose down        # stops everything; orders survive in named volumes
+docker compose down -v     # stops everything and deletes all orders
+```
+
+### If something goes wrong
+
+| Symptom | Fix |
+|---|---|
+| `port is already allocated` on start | another process holds the port; set a different `PORT` in step 1 and run the block again |
+| the page or `curl` cannot connect | check that `PORT` matches `docker compose ps`; after `docker compose down`, start again with step 1 |
+| an order stays `pending` or a stage never answers | `docker compose ps` to see which service is down, `docker compose logs <service>` for the reason |
 
 ## Design decisions and trade-offs
 
@@ -98,7 +212,15 @@ What is deliberately out of this version: more than one orchestrator instance, a
 
 ## Change the pipeline
 
-The stage order, retry settings, sweep interval, and adapters are in [`config/pipeline.toml`](config/pipeline.toml). Per-stage overrides go under `[overrides.<stage>]`. An order keeps the stage list it was submitted with, so a config change affects only later orders.
+The stage order, retry settings, sweep interval, and adapters are in [`config/pipeline.toml`](config/pipeline.toml). Per-stage overrides go under `[overrides.<stage>]`. The file is read at startup, so apply a change with `docker compose restart orchestrator`. An order keeps the stage list it was submitted with, so a change affects only later orders; keep a removed stage's service running until its in-flight orders finish.
+
+For example, to give fraud more time and more attempts:
+
+```toml
+[overrides.fraud]
+max_attempts = 5
+dispatch_deadline_seconds = 20
+```
 
 To add a stage:
 
