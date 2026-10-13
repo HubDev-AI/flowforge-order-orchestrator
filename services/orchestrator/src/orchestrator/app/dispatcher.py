@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from contextlib import suppress
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from bus import MessageBus
@@ -34,43 +34,54 @@ class Dispatcher:
         self._clock = clock
         self._nudge = nudge
 
-    async def tick(self) -> None:
+    async def tick(self) -> bool:
+        """One sweep. Returns True when a batch was full, so more work is probably waiting."""
         now: datetime = self._clock()
         claims = await self._store.claim_due(
             now,
             CLAIM_BATCH_SIZE,
             lambda order: plan_dispatch(order, now, self._config.policy_for),
         )
-        for claim in claims:
-            await self._publish(claim)
-        await self._store.claim_overdue(
+        await self._publish_all(claims)
+        timed_out = await self._store.claim_overdue(
             now,
             CLAIM_BATCH_SIZE,
             lambda order, attempt: transition(
                 order, TimedOut(attempt.key, now), self._config.policy_for(attempt.stage)
             ),
         )
+        return len(claims) == CLAIM_BATCH_SIZE or len(timed_out) == CLAIM_BATCH_SIZE
 
     async def run(self) -> None:
         while True:
+            busy = False
             try:
-                await self.tick()
+                busy = await self.tick()
             except Exception:
                 logger.exception("dispatcher tick failed")
+            if busy:
+                continue
             with suppress(TimeoutError):
                 async with asyncio.timeout(self._config.sweep.interval_seconds):
                     await self._nudge.wait()
             self._nudge.clear()
 
-    async def _publish(self, claim: Claim) -> None:
-        try:
-            await self._bus.publish_command(await self._command(claim.order, claim.attempt))
-        except Exception:
-            logger.exception(
-                "publishing %s of order %s failed; its deadline will retry it",
-                claim.attempt.stage,
-                claim.order.id,
-            )
+    async def _publish_all(self, claims: list[Claim]) -> None:
+        for index, claim in enumerate(claims):
+            try:
+                await self._bus.publish_command(await self._command(claim.order, claim.attempt))
+            except Exception:
+                unsent = claims[index:]
+                logger.exception(
+                    "publishing %s of order %s failed; releasing %s claimed attempts",
+                    claim.attempt.stage,
+                    claim.order.id,
+                    len(unsent),
+                )
+                retry_at = self._clock() + timedelta(seconds=self._config.sweep.interval_seconds)
+                for unpublished in unsent:
+                    await self._store.release(unpublished, retry_at)
+                return
 
     async def _command(self, order: Order, attempt: Attempt) -> Command:
         submission = OrderRequest.model_validate(order.payload)

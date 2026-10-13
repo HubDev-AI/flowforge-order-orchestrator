@@ -1,6 +1,7 @@
 from uuid import UUID, uuid4
 
 from contracts import Outcome
+from orchestrator.app.main import MAX_BODY_BYTES
 
 
 async def test_submission_returns_the_order_id_and_the_initial_state(submit):
@@ -191,3 +192,39 @@ async def test_the_due_time_is_hidden_between_stages_and_shown_while_waiting_to_
     assert between_stages["current_stage"] == "fraud"
     assert between_stages["next_attempt_due_at"] is None
     assert waiting["next_attempt_due_at"] is not None
+
+
+async def test_a_body_over_the_cap_is_rejected_before_it_is_read(client):
+    body = {"payload": {"blob": "x" * MAX_BODY_BYTES}}
+
+    response = await client.post("/api/orders", json=body, headers={"Idempotency-Key": "k1"})
+
+    assert response.status_code == 413
+    assert "bytes" in response.json()["detail"]
+
+
+async def test_a_body_without_a_length_is_rejected(client):
+    async def chunks():
+        yield b'{"payload": {}}'
+
+    response = await client.post(
+        "/api/orders",
+        content=chunks(),
+        headers={"Idempotency-Key": "k1", "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 411
+
+
+async def test_a_script_longer_than_the_attempt_cap_is_rejected(submit):
+    response = await submit(script={"fraud": {"execute": ["retry"] * 4}})
+
+    assert response.status_code == 422
+    assert "4 execute tokens for fraud" in response.json()["detail"]
+    assert "3 attempts" in response.json()["detail"]
+
+
+async def test_a_script_as_long_as_the_attempt_cap_is_accepted(submit):
+    response = await submit(script={"fraud": {"execute": ["retry"] * 3}})
+
+    assert response.status_code == 201

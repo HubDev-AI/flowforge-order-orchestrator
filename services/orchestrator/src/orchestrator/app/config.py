@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     pipeline_config: Path = Path("config/pipeline.toml")
 
 
-class StageSettings(BaseModel):
+class RetrySettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_attempts: int = Field(ge=1)
@@ -42,7 +42,7 @@ class PipelineConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     stages: list[str] = Field(min_length=1)
-    defaults: StageSettings
+    defaults: RetrySettings
     overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
     sweep: SweepSettings
     adapters: AdapterSettings
@@ -63,6 +63,9 @@ class PipelineConfig(BaseModel):
             self._settings_for(stage)
         return self
 
+    def max_attempts_for(self, stage: str) -> int:
+        return self._settings_for(stage).max_attempts
+
     def policy_for(self, stage: str) -> StagePolicy:
         settings = self._settings_for(stage)
         return StagePolicy(
@@ -72,8 +75,8 @@ class PipelineConfig(BaseModel):
             dispatch_deadline=timedelta(seconds=settings.dispatch_deadline_seconds),
         )
 
-    def _settings_for(self, stage: str) -> StageSettings:
-        return StageSettings.model_validate(
+    def _settings_for(self, stage: str) -> RetrySettings:
+        return RetrySettings.model_validate(
             self.defaults.model_dump() | self.overrides.get(stage, {})
         )
 
