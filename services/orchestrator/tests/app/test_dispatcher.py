@@ -1,10 +1,13 @@
+import asyncio
 import logging
+from contextlib import aclosing
 from datetime import timedelta
 from uuid import UUID
 
 from bus import MemoryBus
 from contracts import CommandKind, Outcome
-from orchestrator.app.dispatcher import Dispatcher
+from orchestrator.app.dispatcher import CLAIM_BATCH_SIZE, Dispatcher
+from orchestrator.domain.models import OrderState
 
 
 async def test_a_due_order_is_dispatched_by_one_tick(
@@ -24,10 +27,6 @@ async def test_a_due_order_is_dispatched_by_one_tick(
     assert command.payload == {"sku": "A-1"}
     assert command.script.root["fraud"][CommandKind.EXECUTE][0].value == "reject"
     assert (await status(order["id"]))["state"] == "running"
-
-
-async def test_a_tick_with_nothing_to_do_changes_nothing(dispatcher):
-    await dispatcher.tick()
 
 
 async def test_an_order_is_not_dispatched_before_the_pending_threshold_passes(
@@ -91,34 +90,102 @@ async def test_an_attempt_past_its_deadline_is_timed_out_and_its_late_result_is_
     assert (await status(order["id"]))["current_stage"] == "fraud"
 
 
-async def test_a_failed_publish_is_logged_and_recovered_by_the_deadline(clock, client_for, caplog):
-    class FlakyBus(MemoryBus):
-        failures = 1
+class FlakyBus(MemoryBus):
+    def __init__(self, clock, failures: int) -> None:
+        super().__init__(clock=clock)
+        self.failures = failures
 
-        async def publish_command(self, command):
-            if self.failures:
-                self.failures -= 1
-                raise RuntimeError("broker unreachable")
-            await super().publish_command(command)
+    async def publish_command(self, command):
+        if self.failures:
+            self.failures -= 1
+            raise RuntimeError("broker unreachable")
+        await super().publish_command(command)
 
-    bus = FlakyBus(clock=clock)
+
+async def test_a_failed_publish_releases_the_attempt_and_the_order_is_retried_without_cost(
+    clock, client_for, caplog
+):
+    bus = FlakyBus(clock, failures=1)
     runtime, submit = await client_for(bus)
-    await submit()
+    order = (await submit()).json()
     dispatcher = Dispatcher(runtime.store, bus, runtime.config, clock, runtime.nudge)
 
     with caplog.at_level(logging.ERROR):
         await dispatcher.tick()
     assert "broker unreachable" in caplog.text
+    assert await runtime.store.list_attempts(UUID(order["id"])) == []
+    assert (await runtime.store.get_order(UUID(order["id"]))).next_due_at == clock.now + timedelta(
+        seconds=runtime.config.sweep.interval_seconds
+    )
 
-    clock.advance(11)
     await dispatcher.tick()
-    clock.advance(2)
+    assert await runtime.store.list_attempts(UUID(order["id"])) == []
+    clock.advance(runtime.config.sweep.interval_seconds)
     await dispatcher.tick()
 
-    consumer = bus.consume_commands("inventory")
-    command = await anext(consumer)
-    await consumer.aclose()
-    assert command.attempt == 2
+    async with aclosing(bus.consume_commands("inventory")) as consumer:
+        command = await anext(consumer)
+    assert command.attempt == 1
+    assert [a.attempt for a in await runtime.store.list_attempts(UUID(order["id"]))] == [1]
+
+
+async def test_a_broker_outage_does_not_consume_the_attempt_cap(clock, client_for):
+    bus = FlakyBus(clock, failures=10**6)
+    runtime, submit = await client_for(bus)
+    order = (await submit()).json()
+    dispatcher = Dispatcher(runtime.store, bus, runtime.config, clock, runtime.nudge)
+
+    for _ in range(120):
+        await dispatcher.tick()
+        clock.advance(1)
+
+    stored = await runtime.store.get_order(UUID(order["id"]))
+    assert stored.state is OrderState.RUNNING
+    assert await runtime.store.list_attempts(UUID(order["id"])) == []
+
+
+async def test_the_first_failed_publish_releases_the_rest_of_the_batch(clock, client_for):
+    bus = FlakyBus(clock, failures=0)
+    runtime, submit = await client_for(bus)
+    orders = [(await submit(key=f"k{n}")).json() for n in range(3)]
+    dispatcher = Dispatcher(runtime.store, bus, runtime.config, clock, runtime.nudge)
+    published = []
+    original = bus.publish_command
+
+    async def publish_then_fail(command):
+        if published:
+            raise RuntimeError("broker went away")
+        published.append(command.order_id)
+        await original(command)
+
+    bus.publish_command = publish_then_fail
+    await dispatcher.tick()
+
+    open_attempts = [len(await runtime.store.list_attempts(UUID(order["id"]))) for order in orders]
+    assert open_attempts == [1, 0, 0]
+    assert published == [UUID(orders[0]["id"])]
+
+
+async def test_a_full_batch_is_followed_by_another_tick_without_waiting(clock, client_for):
+    bus = MemoryBus(clock=clock)
+    runtime, submit = await client_for(bus)
+    ids = [UUID((await submit(key=f"k{n}")).json()["id"]) for n in range(CLAIM_BATCH_SIZE + 1)]
+    slow = runtime.config.model_copy(
+        update={"sweep": runtime.config.sweep.model_copy(update={"interval_seconds": 60.0})}
+    )
+    dispatcher = Dispatcher(runtime.store, bus, slow, clock, runtime.nudge)
+    task = asyncio.create_task(dispatcher.run())
+
+    async def all_dispatched():
+        counts = [len(await runtime.store.list_attempts(order_id)) for order_id in ids]
+        return counts == [1] * len(ids)
+
+    try:
+        async with asyncio.timeout(2):
+            while not await all_dispatched():
+                await asyncio.sleep(0.01)
+    finally:
+        task.cancel()
 
 
 async def test_an_undo_command_carries_the_output_of_the_execute_it_reverses(

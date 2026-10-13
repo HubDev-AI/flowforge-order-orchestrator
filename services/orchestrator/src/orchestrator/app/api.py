@@ -19,7 +19,7 @@ from orchestrator.domain.models import Order
 from orchestrator.domain.transitions import Submitted, transition
 
 MAX_IDEMPOTENCY_KEY_LENGTH = 255
-TIMELINE_PAGE = Path(__file__).resolve().parents[3] / "static" / "index.html"
+TIMELINE_PAGE = Path(__file__).resolve().parents[1] / "static" / "index.html"
 
 router = APIRouter(prefix="/api/orders")
 pages = APIRouter()
@@ -42,6 +42,7 @@ async def submit_order(
     stages = tuple(runtime.config.stages)
     try:
         request.script.validate_stages(stages)
+        request.script.validate_lengths(runtime.config.max_attempts_for)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     submission = request.model_dump(mode="json")
@@ -83,10 +84,10 @@ async def get_order_status(order_id: str, runtime: RuntimeDep) -> OrderStatus:
         parsed = UUID(order_id)
     except ValueError:
         raise HTTPException(status_code=404, detail="order not found") from None
-    order = await runtime.store.get_order(parsed)
-    if order is None:
+    found = await runtime.store.get_order_with_attempts(parsed)
+    if found is None:
         raise HTTPException(status_code=404, detail="order not found")
-    return to_status(order, await runtime.store.list_attempts(parsed))
+    return to_status(*found)
 
 
 @pages.get("/", include_in_schema=False)
