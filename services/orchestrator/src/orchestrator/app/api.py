@@ -102,4 +102,4 @@ async def get_order_status(order_id: str, runtime: RuntimeDep) -> OrderStatus:
 @pages.get("/", include_in_schema=False)
 @pages.get("/orders/{order_id}", include_in_schema=False)
 async def timeline_page() -> FileResponse:
-    return FileResponse(TIMELINE_PAGE)
+    return FileResponse(TIMELINE_PAGE, headers={"Cache-Control": "no-cache"})
