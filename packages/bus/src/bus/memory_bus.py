@@ -1,18 +1,14 @@
 import asyncio
 from collections.abc import AsyncIterator, Callable, Sequence
-from datetime import UTC, datetime
+from datetime import datetime
 
-from contracts import Command, Result
+from contracts import Command, Result, utc_now
 
-from bus.port import RESULTS_QUEUE, UnroutableError, stage_queue
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
+from bus.port import RESULTS_QUEUE, UnroutableError, log_expired, stage_queue
 
 
 class MemoryBus:
-    def __init__(self, clock: Callable[[], datetime] = _utc_now) -> None:
+    def __init__(self, clock: Callable[[], datetime] = utc_now) -> None:
         self._clock = clock
         self._queues: dict[str, asyncio.Queue[bytes]] = {RESULTS_QUEUE: asyncio.Queue()}
 
@@ -40,6 +36,8 @@ class MemoryBus:
             command = Command.model_validate_json(await queue.get())
             if command.deadline_at > self._clock():
                 yield command
+            else:
+                log_expired(command)
 
     async def close(self) -> None:
         pass

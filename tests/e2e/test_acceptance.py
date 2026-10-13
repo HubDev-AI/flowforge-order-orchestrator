@@ -126,7 +126,10 @@ def test_only_the_live_attempt_runs_when_a_stage_comes_back_after_timeouts(stack
     assert done["state"] == "completed"
     fraud = [a for a in done["attempts"] if a["stage"] == "fraud"]
     assert [a["outcome"] for a in fraud] == ["timed_out", "timed_out", "succeeded"]
-    ran = [line for line in stack.logs("stage-fraud").splitlines() if order_id in line]
+    lines = [line for line in stack.logs("stage-fraud").splitlines() if order_id in line]
+    dropped = [line for line in lines if "dropped expired" in line]
+    ran = [line for line in lines if line not in dropped]
+    assert len(dropped) == 2
     assert len(ran) == 1
     assert "attempt 3: succeeded" in ran[0]
 
