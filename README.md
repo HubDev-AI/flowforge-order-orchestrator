@@ -11,7 +11,7 @@ Requires Python 3.14 and [uv](https://docs.astral.sh/uv/).
 uv sync
 uv run ruff check . && uv run ruff format --check .
 uv run pytest -m "not contract and not e2e"
-uv run pytest -m contract  # real Postgres via testcontainers, needs Docker
+uv run pytest -m contract  # real Postgres and RabbitMQ via testcontainers, needs Docker
 ```
 
 ## Run
