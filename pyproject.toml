@@ -33,6 +33,7 @@ flowforge-stage = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"
+pythonpath = ["services/stage"]
 asyncio_mode = "auto"
 markers = [
     "contract: adapter contract tests, need Docker",
