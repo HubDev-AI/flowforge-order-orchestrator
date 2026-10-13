@@ -27,6 +27,14 @@ class UnroutableError(Exception):
     pass
 
 
+class NotPublished(Exception):
+    """The command never left this process: the broker cannot have it.
+
+    Any other publish error is ambiguous, since a broker may accept a message whose
+    confirmation is then lost.
+    """
+
+
 class MessageBus(Protocol):
     """Delivery is at least once; the bus never retries a command on its own.
 
@@ -39,7 +47,10 @@ class MessageBus(Protocol):
         ...
 
     async def publish_command(self, command: Command) -> None:
-        """Queue a command for its stage; raise UnroutableError when the stage has no queue."""
+        """Queue a command for its stage.
+
+        Raise NotPublished when nothing was sent, UnroutableError when the stage has no queue.
+        """
         ...
 
     async def publish_result(self, result: Result) -> None: ...

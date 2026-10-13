@@ -8,7 +8,7 @@ from aio_pika.exceptions import ChannelInvalidStateError, DeliveryError
 from contracts import Command, Result, utc_now
 from pydantic import BaseModel, ValidationError
 
-from bus.port import RESULTS_QUEUE, UnroutableError, log_expired, stage_queue
+from bus.port import RESULTS_QUEUE, NotPublished, UnroutableError, log_expired, stage_queue
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,8 @@ class RabbitMQBus:
         await self._connection.close()
 
     async def _publish(self, queue: str, message: BaseModel) -> None:
+        if self._publisher.is_closed:
+            raise NotPublished(f"publisher channel is closed; nothing sent to {queue}")
         body = aio_pika.Message(
             message.model_dump_json().encode(),
             content_type="application/json",

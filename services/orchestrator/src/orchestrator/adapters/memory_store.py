@@ -62,7 +62,10 @@ class MemoryStore:
 
     async def release(self, claim: Claim, due_at: datetime) -> None:
         attempts = self._attempts[claim.order.id]
-        attempts[:] = [a for a in attempts if not (a.is_open and a.matches(claim.attempt.key))]
+        kept = [a for a in attempts if not (a.is_open and a.matches(claim.attempt.key))]
+        if len(kept) == len(attempts):
+            return
+        attempts[:] = kept
         order = self._orders[claim.order.id]
         self._orders[order.id] = replace(order, next_due_at=due_at, updated_at=due_at)
 
