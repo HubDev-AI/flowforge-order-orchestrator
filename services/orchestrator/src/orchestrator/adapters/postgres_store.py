@@ -1,3 +1,4 @@
+from dataclasses import asdict
 from datetime import datetime
 from uuid import UUID
 
@@ -8,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from orchestrator.domain.errors import DuplicateIdempotencyKey
-from orchestrator.domain.models import Attempt, Decision, Order, OrderState
+from orchestrator.domain.models import Attempt, Decision, Dispatch, Order, OrderState
 from orchestrator.ports.store import Claim, Dispatcher, Resolver
 
 IDEMPOTENCY_KEY_CONSTRAINT = "uq_orders_idempotency_key"
@@ -47,6 +48,8 @@ attempts = sa.Table(
     sa.Column("started_at", sa.TIMESTAMP(timezone=True), nullable=False),
     sa.Column("finished_at", sa.TIMESTAMP(timezone=True)),
 )
+
+order_with_attempt = sa.select(orders, *(c for c in attempts.c if c is not attempts.c.id))
 
 
 def _order(row: sa.Row) -> Order:
@@ -98,20 +101,7 @@ class PostgresStore:
         try:
             async with self._engine.begin() as connection:
                 await connection.execute(
-                    sa.insert(orders).values(
-                        id=order.id,
-                        idempotency_key=order.idempotency_key,
-                        payload=order.payload,
-                        payload_hash=order.payload_hash,
-                        stages=list(order.stages),
-                        state=order.state,
-                        current_stage=order.current_stage,
-                        current_kind=order.current_kind,
-                        next_due_at=order.next_due_at,
-                        terminal_reason=order.terminal_reason,
-                        created_at=order.created_at,
-                        updated_at=order.updated_at,
-                    )
+                    sa.insert(orders).values(**(asdict(order) | {"stages": list(order.stages)}))
                 )
         except IntegrityError as error:
             violated = getattr(error.orig.__cause__, "constraint_name", None)
@@ -135,6 +125,22 @@ class PostgresStore:
             ).first()
         return None if row is None else _order(row)
 
+    async def get_order_with_attempts(self, order_id: UUID) -> tuple[Order, list[Attempt]] | None:
+        async with self._engine.connect() as connection:
+            await connection.execution_options(isolation_level="REPEATABLE READ")
+            async with connection.begin():
+                row = (
+                    await connection.execute(sa.select(orders).where(orders.c.id == order_id))
+                ).first()
+                if row is None:
+                    return None
+                history = await connection.execute(
+                    sa.select(attempts)
+                    .where(attempts.c.order_id == order_id)
+                    .order_by(attempts.c.id)
+                )
+                return _order(row), [_attempt(a) for a in history]
+
     async def list_attempts(self, order_id: UUID) -> list[Attempt]:
         async with self._engine.connect() as connection:
             rows = await connection.execute(
@@ -157,22 +163,37 @@ class PostgresStore:
             plans = [(order, dispatch(order)) for order in map(_order, rows)]
             return [await self._open_attempt(connection, order, plan, now) for order, plan in plans]
 
+    async def release(self, claim: Claim, due_at: datetime) -> None:
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                sa.select(orders).where(orders.c.id == claim.order.id).with_for_update()
+            )
+            deleted = await connection.execute(
+                sa.delete(attempts).where(
+                    _of_attempt(claim.attempt), attempts.c.finished_at.is_(None)
+                )
+            )
+            if deleted.rowcount != 1:
+                return
+            await connection.execute(
+                sa.update(orders)
+                .where(orders.c.id == claim.order.id)
+                .values(next_due_at=due_at, updated_at=due_at)
+            )
+
     async def claim_overdue(self, now: datetime, limit: int, resolve: Resolver) -> list[Order]:
         async with self._engine.begin() as connection:
             rows = await connection.execute(
-                sa.select(attempts)
-                .join(orders, orders.c.id == attempts.c.order_id)
+                order_with_attempt.select_from(
+                    attempts.join(orders, orders.c.id == attempts.c.order_id)
+                )
                 .where(attempts.c.finished_at.is_(None), attempts.c.deadline_at < now)
                 .order_by(attempts.c.deadline_at)
                 .limit(limit)
                 .with_for_update(of=orders, skip_locked=True)
             )
-            overdue = [_attempt(row) for row in rows]
-            order_rows = await connection.execute(
-                sa.select(orders).where(orders.c.id.in_({a.order_id for a in overdue}))
-            )
-            by_id = {order.id: order for order in map(_order, order_rows)}
-            resolved = [(a, resolve(by_id[a.order_id], a)) for a in overdue]
+            overdue = [(_order(row), _attempt(row)) for row in rows]
+            resolved = [(attempt, resolve(order, attempt)) for order, attempt in overdue]
             return [await self._close(connection, a, decision) for a, decision in resolved]
 
     async def settle(self, key: AttemptKey, resolve: Resolver) -> Order | None:
@@ -195,7 +216,7 @@ class PostgresStore:
             return await self._close(connection, attempt, resolve(_order(order_row), attempt))
 
     async def _open_attempt(
-        self, connection: AsyncConnection, order: Order, plan, now: datetime
+        self, connection: AsyncConnection, order: Order, plan: Dispatch, now: datetime
     ) -> Claim:
         new = plan.attempt
         taken = await connection.scalar(

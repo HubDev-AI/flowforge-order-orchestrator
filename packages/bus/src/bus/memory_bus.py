@@ -1,26 +1,25 @@
 import asyncio
 from collections.abc import AsyncIterator, Callable, Sequence
-from datetime import UTC, datetime
+from datetime import datetime
 
-from contracts import Command, Result
+from contracts import Command, Result, utc_now
 
-from bus.port import RESULTS_QUEUE, UnroutableError, stage_queue
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
+from bus.port import RESULTS_QUEUE, NotPublished, UnroutableError, log_expired, stage_queue
 
 
 class MemoryBus:
-    def __init__(self, clock: Callable[[], datetime] = _utc_now) -> None:
+    def __init__(self, clock: Callable[[], datetime] = utc_now) -> None:
         self._clock = clock
         self._queues: dict[str, asyncio.Queue[bytes]] = {RESULTS_QUEUE: asyncio.Queue()}
+        self._closed = False
 
     async def declare_topology(self, stages: Sequence[str]) -> None:
         for stage in stages:
             self._queues.setdefault(stage_queue(stage), asyncio.Queue())
 
     async def publish_command(self, command: Command) -> None:
+        if self._closed:
+            raise NotPublished("bus is closed")
         queue = self._queues.get(stage_queue(command.stage))
         if queue is None:
             raise UnroutableError(f"no queue for stage {command.stage}")
@@ -40,6 +39,8 @@ class MemoryBus:
             command = Command.model_validate_json(await queue.get())
             if command.deadline_at > self._clock():
                 yield command
+            else:
+                log_expired(command)
 
     async def close(self) -> None:
-        pass
+        self._closed = True

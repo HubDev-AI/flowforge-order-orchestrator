@@ -8,7 +8,7 @@ RESTART_DELAY_SECONDS = 1.0
 
 
 async def consume_forever[T](
-    open_stream: Callable[[], AsyncIterator[T]], handle: Callable[[T], Awaitable[None]]
+    open_stream: Callable[[], AsyncIterator[T]], handle: Callable[[T], Awaitable[object]]
 ) -> None:
     while True:
         try:

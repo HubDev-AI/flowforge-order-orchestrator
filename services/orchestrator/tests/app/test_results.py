@@ -64,6 +64,20 @@ async def test_a_result_after_its_deadline_counts_as_a_timeout_before_the_sweep_
     assert body["next_attempt_due_at"] is not None
 
 
+async def test_a_late_rejection_is_a_timeout_too_so_the_attempt_is_retried(
+    submit, dispatcher, results, next_command, reply, clock, history, status
+):
+    order = (await submit()).json()
+    await dispatcher.tick()
+    command = await next_command("inventory")
+    clock.advance(11)
+
+    assert await results.handle(reply(command, Outcome.REJECTED, reason="too late")) is True
+
+    assert await history(order["id"]) == [("inventory", "execute", 1, "timed_out")]
+    assert (await status(order["id"]))["state"] == "running"
+
+
 async def test_a_stage_output_is_kept_on_its_attempt(
     submit, dispatcher, results, next_command, reply, status
 ):

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime
 from uuid import UUID
 
@@ -30,6 +31,10 @@ class MemoryStore:
         order_id = self._order_ids_by_key.get(idempotency_key)
         return None if order_id is None else self._orders[order_id]
 
+    async def get_order_with_attempts(self, order_id: UUID) -> tuple[Order, list[Attempt]] | None:
+        order = self._orders.get(order_id)
+        return None if order is None else (order, list(self._attempts[order_id]))
+
     async def list_attempts(self, order_id: UUID) -> list[Attempt]:
         return list(self._attempts.get(order_id, []))
 
@@ -54,6 +59,15 @@ class MemoryStore:
             self._attempts[order.id].append(attempt)
             claims.append(Claim(updated, attempt))
         return claims
+
+    async def release(self, claim: Claim, due_at: datetime) -> None:
+        attempts = self._attempts[claim.order.id]
+        kept = [a for a in attempts if not (a.is_open and a.matches(claim.attempt.key))]
+        if len(kept) == len(attempts):
+            return
+        attempts[:] = kept
+        order = self._orders[claim.order.id]
+        self._orders[order.id] = replace(order, next_due_at=due_at, updated_at=due_at)
 
     async def claim_overdue(self, now: datetime, limit: int, resolve: Resolver) -> list[Order]:
         overdue = sorted(

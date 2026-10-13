@@ -1,7 +1,7 @@
 import logging
 
 from bus import MessageBus, consume_forever
-from contracts import Command, CommandKind, Outcome, Result, ScriptToken
+from contracts import AttemptKey, Command, CommandKind, Outcome, Result, ScriptToken
 
 from stage_kit.handler import StageHandler
 from stage_kit.simulator import Simulator
@@ -35,10 +35,7 @@ class StageRunner:
         return result
 
     async def run(self) -> None:
-        await consume_forever(lambda: self._bus.consume_commands(self._stage), self._handle)
-
-    async def _handle(self, command: Command) -> None:
-        await self.process(command)
+        await consume_forever(lambda: self._bus.consume_commands(self._stage), self.process)
 
     async def _outcome_of(self, command: Command) -> Result:
         match await self._simulator.decide(command):
@@ -55,11 +52,5 @@ class StageRunner:
 
 
 def _result(command: Command, outcome: Outcome, **fields) -> Result:
-    return Result(
-        order_id=command.order_id,
-        stage=command.stage,
-        attempt=command.attempt,
-        kind=command.kind,
-        outcome=outcome,
-        **fields,
-    )
+    identity = command.model_dump(include=set(AttemptKey.model_fields))
+    return Result(**identity, outcome=outcome, **fields)

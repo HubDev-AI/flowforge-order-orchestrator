@@ -35,3 +35,16 @@ def test_script_round_trips_through_json():
     )
 
     assert OutcomeScript.model_validate_json(script.model_dump_json()) == script
+
+
+def test_a_script_longer_than_the_stage_cap_is_rejected_with_the_counts():
+    script = OutcomeScript.model_validate({"fraud": {"undo": ["retry", "retry"]}})
+
+    with pytest.raises(ValueError, match="2 undo tokens for fraud; the stage allows 1 attempts"):
+        script.validate_lengths(lambda stage: 1)
+
+
+def test_a_script_within_every_stage_cap_passes():
+    script = OutcomeScript.model_validate({"fraud": {"execute": ["retry", "succeed"]}})
+
+    script.validate_lengths(lambda stage: 2)

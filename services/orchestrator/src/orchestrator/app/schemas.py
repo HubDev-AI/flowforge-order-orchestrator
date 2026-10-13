@@ -62,17 +62,5 @@ def to_status(order: Order, attempts: list[Attempt]) -> OrderStatus:
         terminal_reason=order.terminal_reason if order.state in TERMINAL else None,
         created_at=order.created_at,
         updated_at=order.updated_at,
-        attempts=[
-            AttemptView(
-                stage=a.stage,
-                kind=a.kind,
-                attempt=a.attempt,
-                outcome=a.outcome,
-                reason=a.reason,
-                stage_output=a.stage_output,
-                started_at=a.started_at,
-                finished_at=a.finished_at,
-            )
-            for a in attempts
-        ],
+        attempts=[AttemptView.model_validate(a, from_attributes=True) for a in attempts],
     )

@@ -34,6 +34,10 @@ class OrderStore(Protocol):
 
     async def get_order_by_key(self, idempotency_key: str) -> Order | None: ...
 
+    async def get_order_with_attempts(self, order_id: UUID) -> tuple[Order, list[Attempt]] | None:
+        """The order and its attempts read from one snapshot, so the two never disagree."""
+        ...
+
     async def list_attempts(self, order_id: UUID) -> list[Attempt]:
         """Attempts in start order; numbering restarts per stage and kind."""
         ...
@@ -44,6 +48,15 @@ class OrderStore(Protocol):
         For each, open the planned attempt (numbered after the stage and kind's last attempt),
         apply the planned decision, and return the updated order with the new attempt. Rows
         another transaction holds are skipped, so concurrent callers never claim the same order.
+        """
+        ...
+
+    async def release(self, claim: Claim, due_at: datetime) -> None:
+        """Take back a claimed attempt whose command provably never left the orchestrator.
+
+        Removes the open attempt row and makes the order due again at `due_at`, so the next
+        claim reuses the attempt number and nothing counts against the attempt cap. When that
+        attempt is no longer open, nothing changes.
         """
         ...
 

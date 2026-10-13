@@ -73,10 +73,8 @@ def transition(order: Order | None, event: Event, policy: StagePolicy | None = N
             return Decision(
                 order.state, order.current_stage, order.current_kind, None, order.terminal_reason
             )
-        case OrderState.RUNNING, Succeeded():
-            return _stage_succeeded(order, event)
-        case OrderState.COMPENSATING, Succeeded():
-            return _undo_succeeded(order, event)
+        case ((OrderState.RUNNING | OrderState.COMPENSATING), Succeeded()):
+            return _succeeded(order, event)
         case ((OrderState.RUNNING | OrderState.COMPENSATING), Retry(reason=reason)):
             return _transient_failure(order, event, Outcome.RETRY, reason, policy)
         case ((OrderState.RUNNING | OrderState.COMPENSATING), TimedOut()):
@@ -107,24 +105,17 @@ def _require_current(order: Order, attempt: AttemptKey) -> None:
         )
 
 
-def _stage_succeeded(order: Order, event: Succeeded) -> Decision:
+def _succeeded(order: Order, event: Succeeded) -> Decision:
     _require_current(order, event.attempt)
     close = AttemptClose(Outcome.SUCCEEDED, None, event.output, event.at)
-    index = order.stages.index(event.attempt.stage)
-    if index == len(order.stages) - 1:
-        return Decision(OrderState.COMPLETED, None, None, None, None, close)
-    return Decision(RUNNING, order.stages[index + 1], EXECUTE, event.at, None, close)
-
-
-def _undo_succeeded(order: Order, event: Succeeded) -> Decision:
-    _require_current(order, event.attempt)
-    close = AttemptClose(Outcome.SUCCEEDED, None, event.output, event.at)
-    index = order.stages.index(event.attempt.stage)
-    if index == 0:
-        return Decision(OrderState.FAILED, None, None, None, order.terminal_reason, close)
-    return Decision(
-        COMPENSATING, order.stages[index - 1], UNDO, event.at, order.terminal_reason, close
-    )
+    undo = order.state is COMPENSATING
+    index = order.stages.index(event.attempt.stage) + (-1 if undo else 1)
+    reason = order.terminal_reason if undo else None
+    if 0 <= index < len(order.stages):
+        kind = UNDO if undo else EXECUTE
+        return Decision(order.state, order.stages[index], kind, event.at, reason, close)
+    final = OrderState.FAILED if undo else OrderState.COMPLETED
+    return Decision(final, None, None, None, reason, close)
 
 
 def _transient_failure(

@@ -230,3 +230,71 @@ async def test_claim_overdue_settles_only_open_attempts_past_their_deadline(
     assert attempt.outcome is Outcome.TIMED_OUT
     assert settled[0].next_due_at == after + policy.backoff_base
     assert (await store.list_attempts(on_time.id))[0].is_open
+
+
+async def test_releasing_a_claim_removes_the_attempt_and_makes_the_order_due_again(
+    store, make_order, dispatch, now
+):
+    order = make_order()
+    await store.create_order(order)
+    [claim] = await store.claim_due(now, 10, dispatch)
+    retry_at = now + timedelta(seconds=1)
+
+    await store.release(claim, retry_at)
+
+    assert await store.list_attempts(order.id) == []
+    released = await store.get_order(order.id)
+    assert (released.state, released.next_due_at) == (OrderState.RUNNING, retry_at)
+    assert await store.claim_due(now, 10, dispatch) == []
+    [again] = await store.claim_due(retry_at, 10, dispatch)
+    assert again.attempt.attempt == 1
+
+
+@pytest.mark.parametrize(
+    "event_for",
+    [
+        lambda now: lambda a: Succeeded(a.key, now),
+        lambda now: lambda a: Rejected(a.key, now, "no"),
+        lambda now: lambda a: Retry(a.key, now, "flaky"),
+        lambda now: lambda a: TimedOut(a.key, now),
+    ],
+    ids=["succeeded", "rejected", "retry", "timed_out"],
+)
+async def test_releasing_a_claim_that_was_settled_meanwhile_changes_nothing(
+    store, make_order, dispatch, settle_with, now, event_for
+):
+    order = make_order(stages=("inventory",))
+    await store.create_order(order)
+    [claim] = await store.claim_due(now, 10, dispatch)
+    await store.settle(claim.attempt.key, settle_with(event_for(now)))
+    before = (await store.get_order(order.id), await store.list_attempts(order.id))
+    later = now + timedelta(seconds=1)
+    other = make_order(next_due_at=later)
+    await store.create_order(other)
+
+    await store.release(claim, later)
+
+    assert (await store.get_order(order.id), await store.list_attempts(order.id)) == before
+    due = await store.claim_due(later, 10, dispatch)
+    assert other.id in [c.order.id for c in due]
+
+
+async def test_an_order_and_its_attempts_are_read_together(
+    store, make_order, dispatch, settle_with, now
+):
+    order = make_order()
+    await store.create_order(order)
+    assert await store.get_order_with_attempts(order.id) == (order, [])
+    [claim] = await store.claim_due(now, 10, dispatch)
+    settled = await store.settle(claim.attempt.key, settle_with(lambda a: Succeeded(a.key, now)))
+    [second] = await store.claim_due(now, 10, dispatch)
+
+    found = await store.get_order_with_attempts(order.id)
+
+    assert found[0] == second.order
+    assert [(a.stage, a.outcome) for a in found[1]] == [
+        ("inventory", Outcome.SUCCEEDED),
+        ("fraud", None),
+    ]
+    assert settled.current_stage == "fraud"
+    assert await store.get_order_with_attempts(make_order().id) is None
