@@ -39,14 +39,17 @@ async def submit_order(
     runtime: RuntimeDep,
     response: Response,
 ) -> SubmissionResponse:
+    submission = request.model_dump(mode="json")
+    digest = payload_hash(submission)
+    existing = await runtime.store.get_order_by_key(idempotency_key)
+    if existing is not None:
+        return _replay(existing, digest, response)
     stages = tuple(runtime.config.stages)
     try:
         request.script.validate_stages(stages)
         request.script.validate_lengths(runtime.config.max_attempts_for)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
-    submission = request.model_dump(mode="json")
-    digest = payload_hash(submission)
     now = runtime.clock()
     due_at = now + timedelta(seconds=runtime.config.sweep.pending_threshold_seconds)
     decision = transition(None, Submitted(at=due_at))
@@ -67,15 +70,21 @@ async def submit_order(
     try:
         await runtime.store.create_order(order)
     except DuplicateIdempotencyKey:
-        existing = await runtime.store.get_order_by_key(idempotency_key)
-        if existing is None or existing.payload_hash != digest:
-            raise HTTPException(
-                status_code=409, detail="idempotency key already used with a different payload"
-            ) from None
-        response.status_code = 200
-        return SubmissionResponse(id=existing.id, state=existing.state)
+        raced = await runtime.store.get_order_by_key(idempotency_key)
+        if raced is None:
+            raise
+        return _replay(raced, digest, response)
     runtime.nudge.set()
     return SubmissionResponse(id=order.id, state=order.state)
+
+
+def _replay(existing: Order, digest: str, response: Response) -> SubmissionResponse:
+    if existing.payload_hash != digest:
+        raise HTTPException(
+            status_code=409, detail="idempotency key already used with a different payload"
+        )
+    response.status_code = 200
+    return SubmissionResponse(id=existing.id, state=existing.state)
 
 
 @router.get("/{order_id}")
