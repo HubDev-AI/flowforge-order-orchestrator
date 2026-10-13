@@ -24,4 +24,4 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --package flowforge-orchestrator
 
 WORKDIR /app/services/orchestrator
-CMD ["uvicorn", "orchestrator.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn orchestrator.app.main:app --host 0.0.0.0 --port 8000"]
