@@ -18,3 +18,10 @@ async def test_the_page_routes_do_not_shadow_the_api(client):
 
     assert response.status_code == 404
     assert response.headers["content-type"].startswith("application/json")
+
+
+async def test_the_page_is_revalidated_so_a_new_deploy_is_seen_at_once(client):
+    response = await client.get("/")
+
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["etag"]
