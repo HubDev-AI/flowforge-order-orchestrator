@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Order timeline</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --surface: #ffffff;
+    --text: #1b1f24;
+    --muted: #5d6673;
+    --line: #d9dee5;
+    --accent: #2457d6;
+    --ok: #1a7f45;
+    --warn: #a15c00;
+    --bad: #b3261e;
+    --progress: #2457d6;
+    --undo: #7a3db8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151a;
+      --surface: #1b2027;
+      --text: #e8ebef;
+      --muted: #9aa4b2;
+      --line: #2d3540;
+      --accent: #7ba2ff;
+      --ok: #55c283;
+      --warn: #e0a23a;
+      --bad: #ff7b72;
+      --progress: #7ba2ff;
+      --undo: #c39bf0;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 64px; }
+  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 24px; }
+  header a { color: var(--text); font-weight: 700; text-decoration: none; }
+  header span { color: var(--muted); }
+  h1 { font-size: 1.25rem; margin: 0 0 4px; overflow-wrap: anywhere; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  label { display: block; font-weight: 600; margin: 12px 0 4px; }
+  label:first-of-type { margin-top: 0; }
+  textarea {
+    width: 100%;
+    min-height: 96px;
+    padding: 8px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .hint { color: var(--muted); font-size: 0.875rem; margin: 4px 0 0; }
+  button {
+    margin-top: 16px;
+    padding: 10px 18px;
+    border: 0;
+    border-radius: 6px;
+    background: var(--accent);
+    color: #fff;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.6; cursor: wait; }
+  :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  [hidden] { display: none !important; }
+  .error { color: var(--bad); margin: 12px 0 0; }
+  .state { display: inline-block; padding: 2px 10px; border-radius: 999px; font-weight: 600;
+    border: 1px solid currentColor; }
+  .state-completed { color: var(--ok); }
+  .state-failed, .state-compensation_failed { color: var(--bad); }
+  .state-pending, .state-running { color: var(--progress); }
+  .state-compensating { color: var(--undo); }
+  .banner, .notice {
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin: 0 0 16px;
+    border: 1px solid var(--warn);
+    color: var(--warn);
+  }
+  #timeline { list-style: none; margin: 0; padding: 0; }
+  .attempt {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-left: 6px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 10px;
+  }
+  .attempt.outcome-succeeded { border-left-color: var(--ok); }
+  .attempt.outcome-retry, .attempt.outcome-timed_out { border-left-color: var(--warn); }
+  .attempt.outcome-rejected, .attempt.outcome-exhausted { border-left-color: var(--bad); }
+  .attempt.in-progress { border-left-color: var(--progress); }
+  .attempt.kind-undo { background: color-mix(in srgb, var(--undo) 10%, var(--surface)); }
+  .attempt-title { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; font-weight: 600; }
+  .tag { font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+    padding: 1px 8px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); }
+  .kind-undo .tag-kind { color: var(--undo); border-color: var(--undo); }
+  .meta { color: var(--muted); font-size: 0.875rem; margin: 4px 0 0; overflow-wrap: anywhere; }
+  .output { font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted);
+    margin: 4px 0 0; overflow-wrap: anywhere; }
+  .in-progress .tag-outcome { color: var(--progress); border-color: var(--progress); }
+  @media (prefers-reduced-motion: no-preference) {
+    .in-progress .tag-outcome { animation: pulse 1.4s ease-in-out infinite; }
+    @keyframes pulse { 50% { opacity: 0.45; } }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header><a href="/">FlowForge</a><span>order orchestrator</span></header>
+
+  <section id="submit-view" hidden>
+    <form id="submit-form" class="card">
+      <label for="payload">Order payload (JSON)</label>
+      <textarea id="payload" spellcheck="false">{"sku": "A-1", "quantity": 1}</textarea>
+      <label for="script">Outcome script (optional JSON)</label>
+      <textarea id="script" spellcheck="false" placeholder='{"fraud": {"execute": ["retry", "retry", "succeed"]}}'></textarea>
+      <p class="hint">Forces outcomes per stage, kind, and attempt: succeed, retry, reject, or timeout.</p>
+      <button type="submit" id="submit-button">Submit order</button>
+      <p id="submit-error" class="error" role="alert" hidden></p>
+    </form>
+  </section>
+
+  <section id="order-view" hidden>
+    <div class="card">
+      <h1 id="order-title"></h1>
+      <p><span id="order-state" class="state"></span> <span id="order-stage"></span></p>
+      <p id="terminal-reason" class="meta" hidden></p>
+    </div>
+    <p id="retry-banner" class="banner" hidden></p>
+    <p id="connection-notice" class="notice" role="status" hidden>
+      Connection lost. Showing the last known timeline and retrying.
+    </p>
+    <ol id="timeline" aria-live="polite"></ol>
+  </section>
+
+  <section id="not-found" class="card" hidden>
+    <h1>Order not found</h1>
+    <p class="meta">No order has this id. <a href="/">Submit a new order</a>.</p>
+  </section>
+</main>
+
+<script>
+  const TERMINAL_STATES = new Set(["completed", "failed", "compensation_failed"]);
+  const POLL_INTERVAL_MS = 1000;
+  const $ = (id) => document.getElementById(id);
+
+  const orderRoute = location.pathname.match(/^\/orders\/([^/]+)\/?$/);
+  if (orderRoute) {
+    watchOrder(decodeURIComponent(orderRoute[1]));
+  } else {
+    showSubmitForm();
+  }
+
+  function newIdempotencyKey() {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  function describeError(body) {
+    const detail = body && body.detail;
+    if (typeof detail === "string") return detail;
+    if (Array.isArray(detail)) {
+      return detail.map((d) => `${(d.loc || []).slice(1).join(".")}: ${d.msg}`).join("; ");
+    }
+    return "The order was not accepted.";
+  }
+
+  function showSubmitForm() {
+    $("submit-view").hidden = false;
+    $("submit-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const error = $("submit-error");
+      error.hidden = true;
+      let request;
+      try {
+        request = { payload: JSON.parse($("payload").value) };
+        const script = $("script").value.trim();
+        if (script) request.script = JSON.parse(script);
+      } catch (parseError) {
+        error.textContent = "The payload and script must be valid JSON.";
+        error.hidden = false;
+        return;
+      }
+      $("submit-button").disabled = true;
+      try {
+        const response = await fetch("/api/orders", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Idempotency-Key": newIdempotencyKey() },
+          body: JSON.stringify(request),
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(describeError(body));
+        location.assign(`/orders/${body.id}`);
+      } catch (failure) {
+        error.textContent = failure.message || "Could not reach the server.";
+        error.hidden = false;
+        $("submit-button").disabled = false;
+      }
+    });
+  }
+
+  function formatTime(iso) {
+    return iso ? new Date(iso).toLocaleTimeString() : "";
+  }
+
+  function label(value) {
+    return value.replace(/_/g, " ");
+  }
+
+  function attemptItem(attempt) {
+    const inProgress = !attempt.finished_at;
+    const item = document.createElement("li");
+    item.className = `attempt kind-${attempt.kind} ` +
+      (inProgress ? "in-progress" : `outcome-${attempt.outcome}`);
+
+    const title = document.createElement("div");
+    title.className = "attempt-title";
+    const stage = document.createElement("span");
+    stage.textContent = attempt.stage;
+    title.append(stage, tag("tag tag-kind", attempt.kind),
+      tag("tag", `attempt ${attempt.attempt}`),
+      tag("tag tag-outcome", inProgress ? "in progress" : label(attempt.outcome)));
+    item.append(title);
+
+    const times = document.createElement("p");
+    times.className = "meta";
+    times.textContent = inProgress
+      ? `started ${formatTime(attempt.started_at)}`
+      : `${formatTime(attempt.started_at)} to ${formatTime(attempt.finished_at)}`;
+    item.append(times);
+
+    if (attempt.reason) {
+      const reason = document.createElement("p");
+      reason.className = "meta";
+      reason.textContent = attempt.reason;
+      item.append(reason);
+    }
+    if (attempt.stage_output) {
+      const output = document.createElement("p");
+      output.className = "output";
+      output.textContent = JSON.stringify(attempt.stage_output);
+      item.append(output);
+    }
+    return item;
+  }
+
+  function tag(className, text) {
+    const element = document.createElement("span");
+    element.className = className;
+    element.textContent = text;
+    return element;
+  }
+
+  function render(order) {
+    $("order-title").textContent = `Order ${order.id}`;
+    const state = $("order-state");
+    state.textContent = label(order.state);
+    state.className = `state state-${order.state}`;
+    $("order-stage").textContent = order.current_stage
+      ? `at ${order.current_stage}${order.state === "compensating" ? " (undo)" : ""}`
+      : "";
+    const reason = $("terminal-reason");
+    reason.hidden = !order.terminal_reason;
+    reason.textContent = order.terminal_reason || "";
+
+    const banner = $("retry-banner");
+    banner.hidden = !order.next_attempt_due_at;
+    if (order.next_attempt_due_at) {
+      banner.textContent =
+        `Waiting to retry ${order.current_stage}. Next attempt due ${formatTime(order.next_attempt_due_at)}.`;
+    }
+    $("timeline").replaceChildren(...order.attempts.map(attemptItem));
+  }
+
+  function watchOrder(orderId) {
+    $("order-view").hidden = false;
+    $("order-title").textContent = `Order ${orderId}`;
+    let lastSnapshot = "";
+
+    async function poll() {
+      let next = true;
+      try {
+        const response = await fetch(`/api/orders/${encodeURIComponent(orderId)}`);
+        if (response.status === 404) {
+          $("order-view").hidden = true;
+          $("not-found").hidden = false;
+          return;
+        }
+        if (!response.ok) throw new Error(`status ${response.status}`);
+        const order = await response.json();
+        $("connection-notice").hidden = true;
+        const snapshot = JSON.stringify(order);
+        if (snapshot !== lastSnapshot) {
+          lastSnapshot = snapshot;
+          render(order);
+        }
+        next = !TERMINAL_STATES.has(order.state);
+      } catch (failure) {
+        $("connection-notice").hidden = false;
+      }
+      if (next) setTimeout(poll, POLL_INTERVAL_MS);
+    }
+    poll();
+  }
+</script>
+</body>
+</html>
