@@ -4,7 +4,7 @@ from datetime import timedelta
 from uuid import uuid4
 
 import pytest
-from bus import UnroutableError
+from bus import NotPublished, UnroutableError
 from contracts import Command, CommandKind, Outcome, Result
 
 
@@ -97,3 +97,10 @@ async def test_a_failing_consumer_does_not_cause_redelivery(bus, command):
 
     async with aclosing(bus.consume_commands("fraud")) as consumer:
         assert await next_item(consumer) == second
+
+
+async def test_publishing_on_a_closed_bus_is_reported_as_not_sent(bus, command):
+    await bus.close()
+
+    with pytest.raises(NotPublished):
+        await bus.publish_command(command())

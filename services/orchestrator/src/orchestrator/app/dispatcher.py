@@ -4,7 +4,7 @@ from contextlib import suppress
 from datetime import datetime, timedelta
 from typing import Any
 
-from bus import MessageBus
+from bus import MessageBus, NotPublished
 from contracts import Command, CommandKind, Outcome
 
 from orchestrator.app.clock import Clock
@@ -70,18 +70,28 @@ class Dispatcher:
         for index, claim in enumerate(claims):
             try:
                 await self._bus.publish_command(await self._command(claim.order, claim.attempt))
-            except Exception:
-                unsent = claims[index:]
+            except NotPublished:
                 logger.exception(
-                    "publishing %s of order %s failed; releasing %s claimed attempts",
+                    "bus is down; releasing %s claimed attempts, first %s of order %s",
+                    len(claims) - index,
                     claim.attempt.stage,
                     claim.order.id,
-                    len(unsent),
                 )
-                retry_at = self._clock() + timedelta(seconds=self._config.sweep.interval_seconds)
-                for unpublished in unsent:
-                    await self._store.release(unpublished, retry_at)
+                await self._release(claims[index:])
                 return
+            except Exception:
+                logger.exception(
+                    "publishing %s of order %s may have failed; its deadline will retry it",
+                    claim.attempt.stage,
+                    claim.order.id,
+                )
+                await self._release(claims[index + 1 :])
+                return
+
+    async def _release(self, unsent: list[Claim]) -> None:
+        retry_at = self._clock() + timedelta(seconds=self._config.sweep.interval_seconds)
+        for claim in unsent:
+            await self._store.release(claim, retry_at)
 
     async def _command(self, order: Order, attempt: Attempt) -> Command:
         submission = OrderRequest.model_validate(order.payload)

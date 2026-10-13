@@ -52,10 +52,11 @@ class OrderStore(Protocol):
         ...
 
     async def release(self, claim: Claim, due_at: datetime) -> None:
-        """Take back a claimed attempt whose command was never published.
+        """Take back a claimed attempt whose command provably never left the orchestrator.
 
         Removes the open attempt row and makes the order due again at `due_at`, so the next
-        claim reuses the attempt number and nothing counts against the attempt cap.
+        claim reuses the attempt number and nothing counts against the attempt cap. When that
+        attempt is no longer open, nothing changes.
         """
         ...
 

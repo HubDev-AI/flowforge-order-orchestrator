@@ -4,19 +4,22 @@ from datetime import datetime
 
 from contracts import Command, Result, utc_now
 
-from bus.port import RESULTS_QUEUE, UnroutableError, log_expired, stage_queue
+from bus.port import RESULTS_QUEUE, NotPublished, UnroutableError, log_expired, stage_queue
 
 
 class MemoryBus:
     def __init__(self, clock: Callable[[], datetime] = utc_now) -> None:
         self._clock = clock
         self._queues: dict[str, asyncio.Queue[bytes]] = {RESULTS_QUEUE: asyncio.Queue()}
+        self._closed = False
 
     async def declare_topology(self, stages: Sequence[str]) -> None:
         for stage in stages:
             self._queues.setdefault(stage_queue(stage), asyncio.Queue())
 
     async def publish_command(self, command: Command) -> None:
+        if self._closed:
+            raise NotPublished("bus is closed")
         queue = self._queues.get(stage_queue(command.stage))
         if queue is None:
             raise UnroutableError(f"no queue for stage {command.stage}")
@@ -40,4 +43,4 @@ class MemoryBus:
                 log_expired(command)
 
     async def close(self) -> None:
-        pass
+        self._closed = True

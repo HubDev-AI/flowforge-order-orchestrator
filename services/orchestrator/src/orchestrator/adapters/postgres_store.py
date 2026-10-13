@@ -127,18 +127,19 @@ class PostgresStore:
 
     async def get_order_with_attempts(self, order_id: UUID) -> tuple[Order, list[Attempt]] | None:
         async with self._engine.connect() as connection:
-            rows = (
-                await connection.execute(
-                    order_with_attempt.select_from(
-                        orders.outerjoin(attempts, attempts.c.order_id == orders.c.id)
-                    )
-                    .where(orders.c.id == order_id)
+            await connection.execution_options(isolation_level="REPEATABLE READ")
+            async with connection.begin():
+                row = (
+                    await connection.execute(sa.select(orders).where(orders.c.id == order_id))
+                ).first()
+                if row is None:
+                    return None
+                history = await connection.execute(
+                    sa.select(attempts)
+                    .where(attempts.c.order_id == order_id)
                     .order_by(attempts.c.id)
                 )
-            ).all()
-        if not rows:
-            return None
-        return _order(rows[0]), [_attempt(row) for row in rows if row.order_id is not None]
+                return _order(row), [_attempt(a) for a in history]
 
     async def list_attempts(self, order_id: UUID) -> list[Attempt]:
         async with self._engine.connect() as connection:
@@ -167,11 +168,13 @@ class PostgresStore:
             await connection.execute(
                 sa.select(orders).where(orders.c.id == claim.order.id).with_for_update()
             )
-            await connection.execute(
+            deleted = await connection.execute(
                 sa.delete(attempts).where(
                     _of_attempt(claim.attempt), attempts.c.finished_at.is_(None)
                 )
             )
+            if deleted.rowcount != 1:
+                return
             await connection.execute(
                 sa.update(orders)
                 .where(orders.c.id == claim.order.id)
