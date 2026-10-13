@@ -1,24 +1,20 @@
 import logging
 from collections.abc import AsyncIterator, Callable, Sequence
-from datetime import UTC, datetime
+from datetime import datetime
 
 import aio_pika
 from aio_pika.abc import AbstractIncomingMessage, AbstractRobustConnection
 from aio_pika.exceptions import ChannelInvalidStateError, DeliveryError
-from contracts import Command, Result
+from contracts import Command, Result, utc_now
 from pydantic import BaseModel, ValidationError
 
-from bus.port import RESULTS_QUEUE, UnroutableError, stage_queue
+from bus.port import RESULTS_QUEUE, UnroutableError, log_expired, stage_queue
 
 logger = logging.getLogger(__name__)
 
 PUBLISH_TIMEOUT_SECONDS = 5.0
 PREFETCH_COUNT = 1
 AMQP_NO_ROUTE = 312
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 class RabbitMQBus:
@@ -33,7 +29,7 @@ class RabbitMQBus:
         self._clock = clock
 
     @classmethod
-    async def connect(cls, url: str, clock: Callable[[], datetime] = _utc_now) -> RabbitMQBus:
+    async def connect(cls, url: str, clock: Callable[[], datetime] = utc_now) -> RabbitMQBus:
         connection = await aio_pika.connect_robust(url)
         publisher = await connection.channel(publisher_confirms=True, on_return_raises=True)
         return cls(connection, publisher, clock)
@@ -49,8 +45,7 @@ class RabbitMQBus:
         await self._publish(RESULTS_QUEUE, result)
 
     async def consume_results(self) -> AsyncIterator[Result]:
-        channel = await self._connection.channel()
-        try:
+        async with self._connection.channel() as channel:
             await channel.set_qos(prefetch_count=PREFETCH_COUNT)
             queue = await channel.declare_queue(RESULTS_QUEUE, durable=True)
             async with queue.iterator() as messages:
@@ -61,12 +56,9 @@ class RabbitMQBus:
                         continue
                     yield result
                     await _ack(message)
-        finally:
-            await channel.close()
 
     async def consume_commands(self, stage: str) -> AsyncIterator[Command]:
-        channel = await self._connection.channel()
-        try:
+        async with self._connection.channel() as channel:
             await channel.set_qos(prefetch_count=PREFETCH_COUNT)
             queue = await channel.declare_queue(stage_queue(stage), durable=True)
             async with queue.iterator() as messages:
@@ -74,10 +66,12 @@ class RabbitMQBus:
                     if not await _ack(message):
                         continue
                     command = _parse(Command, message)
-                    if command is not None and command.deadline_at > self._clock():
+                    if command is None:
+                        continue
+                    if command.deadline_at > self._clock():
                         yield command
-        finally:
-            await channel.close()
+                    else:
+                        log_expired(command)
 
     async def close(self) -> None:
         await self._connection.close()

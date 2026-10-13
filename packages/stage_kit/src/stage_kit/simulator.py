@@ -2,9 +2,9 @@ import asyncio
 import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 
-from contracts import Command, ScriptToken
+from contracts import Command, ScriptToken, utc_now
 
 TIMEOUT_MARGIN_SECONDS = 0.01
 
@@ -17,17 +17,13 @@ class Profile:
     reject_probability: float
 
 
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
-
-
 class Simulator:
     def __init__(
         self,
         profile: Profile,
         rng: random.Random,
         *,
-        clock: Callable[[], datetime] = _utc_now,
+        clock: Callable[[], datetime] = utc_now,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._profile = profile
