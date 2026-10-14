@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 from contracts import Command, CommandKind
 from handlers import fraud, gift_wrap, inventory, shipping
-from main import UnknownStage, load_handler
+from worker import UnknownStage, load_handler
 
 
 def command(stage, kind=CommandKind.EXECUTE, prior=None, order_id=None):
