@@ -24,13 +24,6 @@ class RetrySettings(BaseModel):
     dispatch_deadline_seconds: float = Field(gt=0)
 
 
-class SweepSettings(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    interval_seconds: float = Field(gt=0)
-    pending_threshold_seconds: float = Field(ge=0)
-
-
 class AdapterSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -44,7 +37,6 @@ class PipelineConfig(BaseModel):
     stages: list[str] = Field(min_length=1)
     defaults: RetrySettings
     overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    sweep: SweepSettings
     adapters: AdapterSettings
 
     @field_validator("stages")

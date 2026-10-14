@@ -1,5 +1,7 @@
 # flowforge-order-orchestrator
 
+> **Experiment branch.** This branch runs the stages on Celery instead of the orchestrator's own dispatcher, to compare the two. It is not for merge. What changed, the end-to-end results, and what Celery gives and takes away are in [`docs/celery-experiment.md`](docs/celery-experiment.md). The rest of this README describes `main`.
+
 An order is submitted through a REST API and runs through a configurable sequence of slow, sometimes failing stages (inventory, fraud, shipping) until it lands in a terminal state. Anyone can ask where an order is and how it got there, in the API or on a small timeline page. The stages are simulated; the point is the orchestration, the state model, and the visibility of the workflow.
 
 ## Architecture

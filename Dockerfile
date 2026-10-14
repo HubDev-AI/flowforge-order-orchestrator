@@ -10,7 +10,6 @@ RUN useradd --system --uid 10001 --no-create-home app
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
 COPY packages/contracts/pyproject.toml packages/contracts/
-COPY packages/bus/pyproject.toml packages/bus/
 COPY packages/stage_kit/pyproject.toml packages/stage_kit/
 COPY services/orchestrator/pyproject.toml services/orchestrator/
 COPY services/stage/pyproject.toml services/stage/
@@ -19,7 +18,6 @@ FROM workspace AS orchestrator
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-install-workspace --no-dev --package flowforge-orchestrator
 COPY packages/contracts packages/contracts
-COPY packages/bus packages/bus
 COPY services/orchestrator services/orchestrator
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --package flowforge-orchestrator
@@ -31,10 +29,11 @@ FROM workspace AS stage
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-install-workspace --no-dev --package flowforge-stage
 COPY packages/contracts packages/contracts
-COPY packages/bus packages/bus
 COPY packages/stage_kit packages/stage_kit
 COPY services/stage services/stage
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --package flowforge-stage
 USER app
-CMD ["python", "services/stage/main.py"]
+ENV PYTHONPATH=/app/services/stage
+WORKDIR /app/services/stage
+CMD ["sh", "-c", "exec celery -A worker worker --queues stage.${STAGE_NAME} --hostname ${STAGE_NAME}@%h --concurrency 1 --pool prefork --without-mingle --without-gossip --loglevel INFO"]
