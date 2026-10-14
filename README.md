@@ -185,8 +185,10 @@ The reasoning behind each choice, the alternatives that were rejected, and where
 | Decision | What it buys | What it costs |
 |---|---|---|
 | The orchestrator owns the state machine and commands each stage over a broker | One place holds the rules, so history and status come for free | A single coordinator: one instance only, and the dispatcher is not safe to replicate |
+| Build the orchestrator rather than adopt Temporal or another workflow engine | The workflow is ordinary code: one pure function, unit tested, readable in one place, and no extra platform to run | We own retries, timeouts, and compensation; Temporal is the first candidate once several instances, several workflow types, or long-running workflows are needed |
 | A pure transition function; retries and timeouts only write rows | Every edge of the state diagram is a unit test, and a backoff survives a restart | Recovery is driven by polling, so it is only as fast as the sweep interval |
 | One sweep recovers both lost dispatches and silent stages, using a deadline on every command | One mechanism instead of an outbox plus a watchdog | A dead stage costs one attempt and one deadline window (10s by default). A command the bus could not send (connection down) is released and does not count. A publish whose confirmation is lost may have reached the broker, so it keeps its attempt and its deadline recovers it |
+| RabbitMQ rather than Redis | Losing a command or result is unacceptable here; RabbitMQ confirms a message only once it is on disk | A confirm can take a few hundred milliseconds; Redis is the right choice when latency is the top priority and losing the last second of messages is tolerable |
 | RabbitMQ with acknowledge-before-handler, and no broker retries or dead-letter queue | A single retry authority, the orchestrator, so attempts are counted once | A stage that crashes mid-handler loses that command until its deadline fires |
 | An order row plus an append-only attempt log, in Postgres | The visible history is the log, and several containers can write safely | No event replay or time-travel; SQLite was rejected because it is not safe across processes |
 | An atomic store port: claim, time out, and settle each take a pure callback | An attempt row and its order update land together or not at all, so a crash cannot strand an order | The port is less obvious than separate calls, and the Postgres adapter must keep it in one transaction |
@@ -207,6 +209,8 @@ The reasoning behind each choice, the alternatives that were rejected, and where
 | Load | The payload travels in every command, including undo commands | Bytes on the bus per order are payload x stages x attempts x 2 at worst, bounded by the body cap. History is append-only with no retention; per-order rows are bounded at stages x `max_attempts` x 2 |
 | Clocks | Deadlines are absolute times set by the orchestrator and compared on the stage's clock | Containers must share a clock; a skew larger than the 10 ms margin lets a scripted timeout succeed early |
 | Availability | Submission needs the database only; progress needs the broker too | Orders accepted during a broker outage wait; nothing counts against them while the bus reports itself down; only a command that may have reached the broker is counted, as it may also run. |
+
+The comparison with off-the-shelf workflow engines (Temporal, Camunda, Step Functions, Celery, and others) and with Redis as the broker is in the design record, under "Build or adopt the orchestrator" and "Broker: RabbitMQ or Redis".
 
 What is deliberately out of this version: more than one orchestrator instance, authentication, structured logs and metrics, a manual retry for terminal orders, and Redis and SQLite adapters. The full list is under "Limits" in the design record.
 
