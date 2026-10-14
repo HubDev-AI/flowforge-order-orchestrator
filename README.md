@@ -218,7 +218,7 @@ For example, to give fraud more time, more attempts, and a longer wait for a wor
 ```toml
 [overrides.fraud]
 max_attempts = 5
-dispatch_deadline_seconds = 20
+deadline_seconds = 20
 max_wait_seconds = 120
 ```
 

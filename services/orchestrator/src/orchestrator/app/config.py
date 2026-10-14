@@ -21,7 +21,7 @@ class RetrySettings(BaseModel):
     max_attempts: int = Field(ge=1)
     backoff_base_seconds: float = Field(gt=0)
     backoff_cap_seconds: float = Field(gt=0)
-    dispatch_deadline_seconds: float = Field(gt=0)
+    deadline_seconds: float = Field(gt=0)
     max_wait_seconds: float = Field(gt=0)
 
 
@@ -65,7 +65,7 @@ class PipelineConfig(BaseModel):
             max_attempts=settings.max_attempts,
             backoff_base=timedelta(seconds=settings.backoff_base_seconds),
             backoff_cap=timedelta(seconds=settings.backoff_cap_seconds),
-            dispatch_deadline=timedelta(seconds=settings.dispatch_deadline_seconds),
+            deadline=timedelta(seconds=settings.deadline_seconds),
             max_wait=timedelta(seconds=settings.max_wait_seconds),
         )
 

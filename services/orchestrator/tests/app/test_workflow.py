@@ -10,7 +10,7 @@ from .conftest import pipeline_config
 
 def test_the_pipeline_runs_each_stage_on_its_own_queue_with_its_policy(make_order):
     config = pipeline_config().model_copy(
-        update={"overrides": {"fraud": {"dispatch_deadline_seconds": 5, "max_attempts": 6}}}
+        update={"overrides": {"fraud": {"deadline_seconds": 5, "max_attempts": 6}}}
     )
     order = make_order(payload={"payload": {"sku": "A-1"}})
 

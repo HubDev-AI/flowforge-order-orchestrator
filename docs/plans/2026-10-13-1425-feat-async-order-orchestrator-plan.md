@@ -155,7 +155,7 @@ stateDiagram-v2
 - AE3. **Covers R11, R13, R14.** Given an attempt cap of 3 and an outcome script of three transient failures for `inventory`, when the order runs, then `inventory` attempt 3 is recorded as `exhausted`, the `inventory` undo succeeds, and the order ends in `failed`.
 - AE4. **Covers R12, R13, R14.** Given `fraud` is scripted to reject, when the order runs, then the history shows `inventory` execute succeeded, `fraud` execute rejected, `fraud` undo succeeded, `inventory` undo succeeded, and the order ends in `failed` with the rejection reason.
 - AE5. **Covers R13, R14.** Given AE4's setup and the `inventory` undo scripted to fail transiently on every attempt, when the order runs, then the undo is recorded as exhausted and the order ends in `compensation_failed`.
-- AE6. **Covers R7, R11.** Given a stage is scripted to delay past the dispatch deadline on attempt 1 and succeed on attempt 2, when attempt 1's late result arrives after attempt 2 was dispatched, then the late result is ignored and the history shows attempt 1 as timed out and attempt 2 as succeeded.
+- AE6. **Covers R7, R11.** Given a stage is scripted to delay past its deadline on attempt 1 and succeed on attempt 2, when attempt 1's late result arrives after attempt 2 was dispatched, then the late result is ignored and the history shows attempt 1 as timed out and attempt 2 as succeeded.
 - AE7. **Covers R8, R22.** Given an order is `running` with a command dispatched, when the orchestrator restarts before the result arrives, then the order resumes from the same stage after restart and the attempt history is intact.
 - AE8. **Covers R2, R4.** Given a new stage service is added with a handler and a Compose entry and the config list is extended with its name, when the system starts and an order runs, then the new stage executes in its configured position with no orchestrator code change.
 - AE9. **Covers R3.** Given the pipeline config names a stage twice, when the orchestrator starts, then it exits with an error naming the duplicate.
@@ -185,22 +185,22 @@ Deferred for later, each named as an extension point in the design:
 - Authentication and authorisation on the API.
 - Health and readiness endpoints beyond the Compose healthchecks.
 - Real stage logic. Stages stay simulated.
-- Redis and SQLite adapters. The ports exist (KTD1); only RabbitMQ, Postgres, and in-memory adapters are built.
-- Running more than one orchestrator instance.
+- A Redis broker and a SQLite store. Dramatiq has a Redis broker and the store sits behind a port (KTD1); only RabbitMQ, Postgres, and the in-memory store are built.
+- Running more than one recorder.
 
 Considered and not built:
 
 - Gating the outcome script behind a simulation-mode flag. Every caller is trusted in this version and stages are simulated, so an ungated script harms nothing; the flag earns its place when the first real stage lands.
-- A dead-letter exchange. The orchestrator owns retries and the attempt row is the record of exhaustion, so nothing would ever be dead-lettered (KTD4).
-- A transactional outbox table. The open attempt row with its deadline already plays that role and the dispatcher loop is the relay (KTD3).
+- A dead-letter exchange of the application's own. Dramatiq dead-letters a failed stage message to `stage.<name>.XQ`, and the attempt row stays the record of what happened (KTD4).
+- A transactional outbox table. An order whose pipeline never reached the queue is given up after its first stage's maximum wait (R22), so it cannot stay `pending` without an outbox relay (KTD3).
 
 ### Dependencies / Assumptions
 
 - Postgres and RabbitMQ run as Compose services alongside the orchestrator and the stage services.
 - The simulated stages have no real side effects, so undo handlers are exercised only through the failure simulator.
 - Callers are trusted. The API has no authentication in this version.
-- Exactly one orchestrator instance runs. The dispatcher loop and the results consumer are not safe to replicate in this version.
-- Containers share the host clock, so an absolute deadline set by the orchestrator can be compared against the stage service's own clock.
+- Exactly one recorder runs, so events are applied in order. The orchestrator API and its wait watcher may be replicated, since a duplicate give-up is ignored.
+- Containers share the host clock, so a handoff stamp set where work is enqueued can be compared on the worker's clock and in the watcher.
 
 ---
 
@@ -219,80 +219,59 @@ Considered and not built:
 - KTD9. **One stage image, handler chosen by `STAGE_NAME`.** The stage worker runs the `flowforge.stage` Dramatiq actor on the queue `stage.<STAGE_NAME>`. The stage kit is a package with the simulator and the handler protocol (`execute`, `undo`, both async, both receiving the command). Handlers for `inventory`, `fraud`, and `shipping` live in `services/stage/handlers/`. Each Compose stage service runs the same image with a different `STAGE_NAME`. Default `undo` returns success and does nothing. Chosen over one image per stage: three Dockerfiles for identical code. Governs R4, R13, R23.
 - KTD10. **Simulator semantics.** The outcome script is keyed by `(stage, kind, attempt)`; tokens are `succeed`, `retry`, `reject`, `timeout` (sleep until the deadline has passed, then report success). Attempts a script leaves unlisted for a listed stage succeed; stages absent from the script use their profile. The script is validated at submission against the snapshotted stage list and rejected with 422 on an unknown stage or token, or more tokens than the stage's attempt cap. The script is part of the payload for R26 comparison and travels in every message. Profiles come from stage-service environment. A handler exception is reported as `retry` with the exception class name as reason. An answer after the deadline is recorded as `timed_out`, or `exhausted` on the final allowed attempt, with reason `deadline passed`. Governs R18, R19.
 - KTD11. **Idempotency mechanics.** `Idempotency-Key` is a required header; a missing key is 422. The key has a unique index; a concurrent duplicate insert is caught and re-read. Payload comparison is a SHA-256 of canonical JSON (sorted keys) stored on the order. Create returns 201, idempotent replay 200, mismatch 409. Governs R9, R26.
-- KTD12. **Pipeline config is a TOML file.** `config/pipeline.toml` holds the ordered stage list, global retry defaults (max attempts, backoff base and cap, dispatch deadline, pending threshold, sweep interval), optional per-stage overrides, and the adapter selection. Read with the standard library `tomllib`; validated into a Pydantic settings model at startup; a duplicate or empty stage list fails startup. Chosen over environment variables: a list with per-stage overrides does not read well as env. Governs R1, R3.
+- KTD12. **Pipeline config is a TOML file.** `config/pipeline.toml` holds the ordered stage list, global retry defaults (max attempts, backoff base and cap, the attempt deadline, the maximum wait for a worker), optional per-stage overrides, and the adapter selection. Read with the standard library `tomllib`; validated into a Pydantic settings model at startup; a duplicate or empty stage list fails startup. Chosen over environment variables: a list with per-stage overrides does not read well as env. Governs R1, R3.
 - KTD13. **Timeline page is static and served by the orchestrator.** One HTML file with inline JS under `services/orchestrator/static/`, served at `/orders/{id}` and `/`; the API lives under `/api/orders`. No build step, no frontend toolchain. Status exposes `next_attempt_due_at` so the waiting-to-retry state is explicit. Governs R17, R27, R28.
-- KTD14. **Toolchain and pins.** Python 3.14 (`python:3.14.8-slim`), uv 0.13.0 via `ghcr.io/astral-sh/uv:0.13.0`, `postgres:18.6-alpine`, `rabbitmq:4.3.6-management`. Pins verified against PyPI on 2026-10-13: FastAPI 0.143.0, Pydantic 2.14.1, pydantic-settings 2.15.0, uvicorn 0.54.0, SQLAlchemy 2.1.4 with asyncpg 0.32.0, Alembic 1.20.0, aio-pika 10.1.1, pytest 9.1.1, pytest-asyncio 1.4.0, httpx 0.28.1, testcontainers 4.15.0, ruff 0.17.0. Exact versions live in `uv.lock`.
+- KTD14. **Toolchain and pins.** Python 3.14 (`python:3.14.8-slim`), uv 0.13.0 via `ghcr.io/astral-sh/uv:0.13.0`, `postgres:18.6-alpine`, `rabbitmq:4.3.6-management`. Pins verified against PyPI: FastAPI 0.143.0, Pydantic 2.14.1, pydantic-settings 2.15.0, uvicorn 0.54.0, SQLAlchemy 2.1.4 with asyncpg 0.32.0, Alembic 1.20.0, Dramatiq 2.2.1 with its RabbitMQ extra, psycopg 3.3.6 for the recorder, pytest 9.1.1, pytest-asyncio 1.4.0, httpx 0.28.1, testcontainers 4.15.0, ruff 0.17.0. The first version pinned aio-pika 10.1.1 instead of Dramatiq. Exact versions live in `uv.lock`.
 - KTD15. **Three test layers.** Unit tests run the simulator, the contracts and middleware, the stage worker's decisions, the API against an in-memory store, and the pipeline and give-up logic, with no Docker. Contract tests run the store, the recorder, and the migrations against real Postgres (testcontainers). End-to-end tests drive the Compose stack through the API only and cover every acceptance example observable that way, plus broker and orchestrator restarts. Governs R20, R21.
 
 ### High-Level Technical Design
 
-Components and the two ports.
+Components.
 
 ```mermaid
 flowchart TB
-  client[Client or timeline page] -->|HTTP| api[Orchestrator API]
-  api --> store[(Order store port)]
-  disp[Dispatcher loop] --> store
-  disp -->|publish command| bus[(Message bus port)]
-  results[Results consumer] --> store
-  bus -->|results| results
-  bus -->|stage.inventory| s1[Stage: inventory]
-  bus -->|stage.fraud| s2[Stage: fraud]
-  bus -->|stage.shipping| s3[Stage: shipping]
-  s1 -->|result| bus
-  s2 -->|result| bus
-  s3 -->|result| bus
-  store -.->|adapter| pg[(Postgres)]
-  bus -.->|adapter| mq[(RabbitMQ)]
+  client[Client or timeline page] -->|HTTP| api[Orchestrator API and wait watcher]
+  api -->|create order, read status| pg[(Postgres)]
+  api -->|pipeline of stage messages, give-up events| mq[(RabbitMQ)]
+  mq -->|stage.inventory, stage.fraud, stage.shipping| w[Stage workers]
+  w -->|next stage, retries, attempt events| mq
+  mq -->|orchestrator.records| rec[Recorder]
+  rec -->|order state and history| pg
+  rec -->|undo pipeline| mq
 ```
 
-One attempt, from due to recorded.
+One attempt, from handoff to recorded.
 
 ```mermaid
 sequenceDiagram
-  participant D as Dispatcher loop
-  participant S as Store
-  participant B as Bus
+  participant A as API or previous stage
+  participant B as RabbitMQ
   participant W as Stage worker
-  participant R as Results consumer
-  D->>S: claim due order (FOR UPDATE SKIP LOCKED), insert attempt with deadline, clear due time, commit
-  D->>B: publish command (confirms, mandatory)
-  B->>W: deliver command
-  W->>W: deadline passed? ack and drop
-  W->>B: ack
-  W->>W: simulator decides outcome, handler runs
-  W->>B: publish result
-  B->>R: deliver result
-  R->>S: lock order, guarded close of attempt, apply transition, set due time, commit
-  R-->>D: nudge
+  participant R as Recorder
+  participant S as Postgres
+  A->>B: enqueue stage message (stamped with handoff time, confirmed)
+  B->>W: deliver
+  W->>W: waited past max wait? drop and log
+  W->>B: event started
+  W->>W: simulator decides, handler runs, deadline checked from start
+  W->>B: event succeeded, retry, or failed
+  W->>B: on success Dramatiq enqueues the next stage; on retry, the same message after its delay
+  B->>R: deliver events in order
+  R->>S: guarded write of attempt and order, waiting_since for the next handoff
+  R->>B: on a permanent failure, the undo pipeline
 ```
 
-Dispatcher loop, directional pseudo-code.
+Wait watcher, directional pseudo-code.
 
 ```text
-loop forever:
-    wait until nudged or interval elapsed
-    try:
-        for order in store.claim_due(now, limit):      # locked rows only
-            attempt = store.open_attempt(order, deadline=now + stage.deadline)
-            commit
-            bus.publish(command_for(order, attempt))
-        for attempt in store.claim_overdue(now, limit):
-            apply transition(order, TimedOut(attempt))  # may set due time or enter compensating
-            commit
-    except Exception:
-        log and continue   # the loop must never die silently
-```
-
-Transition function shape.
-
-```text
-transition(order, event) -> Decision
-  event ∈ {Submitted, Dispatched(attempt), Succeeded(attempt, output), Retry(attempt, reason),
-           TimedOut(attempt), Rejected(attempt, reason)}
-  Decision = new state, current stage and kind, due time or None,
-             terminal reason or None, attempt rows to close
-  illegal (state, event) pairs raise; the table is the single source of edges
+every second:
+    for order in store.waiting_orders(limit):          # active, handed off, nothing running
+        stage = order.current_stage or first stage
+        if now - order.waiting_since > max_wait(stage) + margin:
+            send give-up event (order, stage, kind, waiting_since)
+recorder on give-up:
+    if order is still waiting on that same handoff with nothing running:
+        undo every stage that ran, in reverse, or end the order if nothing ran
 ```
 
 ### Output Structure
@@ -300,40 +279,38 @@ transition(order, event) -> Decision
 ```text
 pyproject.toml                 # uv workspace root, ruff + pytest config
 uv.lock
+Dockerfile                     # orchestrator and stage targets
 docker-compose.yml
 config/pipeline.toml
 packages/
-  contracts/                   # command, result, outcome, script models
-  bus/                         # MessageBus protocol, memory_bus.py, rabbitmq_bus.py
-  stage_kit/                   # consumer loop, simulator, handler protocol
+  contracts/                   # command, outcome, script models; Dramatiq message contract and middleware
+  stage_kit/                   # simulator, handler protocol, settings
 services/
   orchestrator/
-    Dockerfile
-    alembic/                   # one migration
+    alembic/                   # three migrations
     src/orchestrator/
-      domain/                  # transitions.py, models.py (pure)
+      domain/                  # models.py, errors.py
       ports/                   # store.py (Protocol)
       adapters/                # memory_store.py, postgres_store.py
-      app/                     # api.py, dispatcher.py, results.py, config.py, lifespan.py
-    static/index.html
+      app/                     # api.py, config.py, lifespan.py, schemas.py, workflow.py (pipeline and watcher)
+      recorder.py              # Dramatiq actor, the only writer of order state
+      static/index.html
     tests/
   stage/
-    Dockerfile
-    handlers/                  # inventory.py, fraud.py, shipping.py
+    worker.py                  # Dramatiq stage actor
+    handlers/                  # inventory.py, fraud.py, shipping.py, gift_wrap.py
     tests/
 tests/
-  contract/                    # store and bus contract suites, parametrised over adapters
-  e2e/                         # Compose-driven acceptance tests
+  contract/                    # store, recorder, migrations against real Postgres
+  e2e/                         # Compose-driven acceptance and restart tests
 docs/
-  brief.md
-  plans/
 ```
 
 ### Risks
 
-- **aio-pika 10.1.x reconnect behaviour is days old.** Mitigation: exact pin, the broker-restart scenarios in U5 and U9. If reconnect proves unreliable, the fallback is the 9.6.x line with the same adapter interface.
+- **Broker reconnects.** Dramatiq's RabbitMQ broker reconnects on its own; the broker-restart scenario in the end-to-end suite guards it.
 - **Python 3.14 wheels.** asyncpg, pydantic-core, and psycopg ship cp314 wheels today; if any pin fails to install, drop to `python:3.13.16-slim` in U1 with no other change.
-- **Deadline and sweep tuning.** A sweep interval close to the dispatch deadline detects timeouts late and makes AE6 flaky. Defaults in `pipeline.toml`: sweep 1s, deadline 10s, pending threshold 0s. The e2e suite asserts outcomes, not timings.
+- **Wait tuning.** The maximum wait (60 s by default) trades how long an order holds for a stage that is down against how soon it is given up. The give-up margin (5 s) must exceed clock drift between containers. The e2e suite asserts outcomes, not timings.
 - **Compose-driven e2e needs Docker on the host.** Unit tests stay Docker-free so the state machine and API can be verified anywhere.
 - **Scripted `timeout` holds a worker.** With prefetch 1, a `timeout` attempt blocks that stage's single consumer for the deadline window. Acceptable for tests; one consumer per stage is the design.
 
@@ -344,6 +321,8 @@ U1 then U2 unblock everything. U3 is pure and independent of infrastructure. U4 
 ---
 
 ## Implementation Units
+
+The units below are the first version as it was built, with its own dispatcher, results consumer, and RabbitMQ adapter. The 2026-10-14 revision replaced U5's adapter, U6's dispatcher and results consumer, U3's transition module, and U7's runner with the Dramatiq design; `docs/library-evaluation.md` records why.
 
 ### U1. Workspace, containers, and config
 
@@ -546,10 +525,10 @@ U1 then U2 unblock everything. U3 is pure and independent of infrastructure. U4 
 |---|---|---|---|
 | Lint and format | `uv run ruff check . && uv run ruff format --check .` | all units | exit 0 |
 | Unit tests, no Docker | `uv run pytest -m "not contract and not e2e"` | U2, U3, U6, U7, U8 | all pass |
-| Adapter contract tests | `uv run pytest -m contract` | U4, U5 | pass against in-memory and real adapters |
+| Contract tests | `uv run pytest -m contract` | store, recorder, migrations | pass against real Postgres |
 | Stack boots | `docker compose up -d --build --wait` | U1 | all services healthy |
 | End-to-end | `uv run pytest -m e2e` | U9 | all AEs and restart tests pass |
-| Transition coverage | unit tests in `services/orchestrator/tests/domain/test_transitions.py` | U3 | one test per diagram edge, count equals edge count |
+| Transition coverage | contract tests in `tests/contract/test_recorder.py` | recorder | every edge of the state diagram in `docs/design.md` is exercised |
 
 Markers `contract` and `e2e` are declared in `pyproject.toml`. Contract and e2e tests require Docker on the host.
 
@@ -559,7 +538,7 @@ Markers `contract` and `e2e` are declared in `pyproject.toml`. Contract and e2e 
 
 - All six Verification Contract rows pass on a clean checkout.
 - Every AE in the Product Contract is cited by at least one test scenario that exists and passes.
-- Each port has two adapters passing the same contract suite.
+- The store port has a Postgres adapter tested against real Postgres and an in-memory adapter for API tests.
 - Adding a fourth stage needs only a handler module, a Compose entry, and a config line (AE8 demonstrates it).
 - `docs/design.md` and `README.md` exist and match the shipped code; this plan's KTDs are updated if implementation changed a decision.
 - No dead-end or experimental code remains: abandoned adapters, unused config keys, and commented-out blocks are removed before done.
@@ -572,6 +551,7 @@ Markers `contract` and `e2e` are declared in `pyproject.toml`. Contract and e2e 
 - Brief: `docs/brief.md`.
 - Research dossiers: `docs/research/web.md` (client shortlist and versions), `docs/research/best-practices.md` (ack placement, outbox, sweep), `docs/research/framework-docs.md` (aio-pika 10.1 behaviour), `docs/research/spec-flow.md` (flow gaps and defaults), `docs/research/planning-context.md`.
 - Dependency versions verified against PyPI and Docker Hub on 2026-10-13 (KTD14).
-- aio-pika 10.x release notes: 10.1.0 stopped automatic channel restoration on connection close; 10.1.1 restores robust consumers after broker cancellation. Basis for the exact pin and the broker-restart test (KTD2).
+- Dramatiq 2.2.1 source, read for the revision: `AgeLimit` measures from the first enqueue and a retry keeps that timestamp; `on_failure` fires after every failed run; the RabbitMQ broker publishes without confirms unless `confirm_delivery=True`. Basis for KTD2 and KTD4.
+- aio-pika 10.x release notes (first version): 10.1.0 stopped automatic channel restoration on connection close; 10.1.1 restores robust consumers after broker cancellation. Basis for the exact pin and the broker-restart test (KTD2).
 - RabbitMQ guidance: an expired message with no dead-letter exchange is dropped silently; quorum queues impose a delivery limit and consumer timeout. Basis for durable classic queues and no TTL (KTD4).
-- Saga and outbox practice: publisher confirms do not cover a crash between commit and publish; a persisted open attempt with a deadline plus a sweep is an outbox-and-relay. Basis for KTD3.
+- Saga and outbox practice: publisher confirms do not cover a crash between commit and publish; a persisted open attempt with a deadline plus a sweep is an outbox-and-relay. Basis for the first version's KTD3; the revision bounds the wait instead (R22).

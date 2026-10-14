@@ -18,7 +18,7 @@ def pipeline_config(stages=STAGES) -> PipelineConfig:
                 "max_attempts": 3,
                 "backoff_base_seconds": 1.0,
                 "backoff_cap_seconds": 30.0,
-                "dispatch_deadline_seconds": 10.0,
+                "deadline_seconds": 10.0,
                 "max_wait_seconds": 60.0,
             },
             "adapters": {"bus": "memory", "store": "memory"},
