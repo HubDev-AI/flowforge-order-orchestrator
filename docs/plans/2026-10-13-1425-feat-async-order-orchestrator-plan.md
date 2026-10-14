@@ -13,12 +13,12 @@ execution: code
 ## Goal Capsule
 
 - **Objective:** An order submitted through the REST API is processed through a configurable sequence of slow, intermittently failing stages, and anyone querying the order sees exactly where it is and how it got there, until it lands in a terminal state.
-- **Means:** The orchestrator stores each order in Postgres and hands it to a Dramatiq pipeline over RabbitMQ, one message per stage on that stage's queue. Stage workers, built from one stage-kit package, report every attempt as an event; a recorder service applies the events and is the only writer of order state. The application owns the recovery policy: backoff, deadlines, compensation, and a bounded wait for a stage that is down.
+- **Means:** The orchestrator stores each order in Postgres and hands it to a Dramatiq pipeline over RabbitMQ, one message per stage on that stage's queue. Stage workers, built from one stage-kit package, report every attempt as an event; a recorder service applies the events and makes every change to order state after the API inserts the order. The application owns the recovery policy: backoff, deadlines, compensation, and a bounded wait for a stage that is down.
 - **Product authority:** The brief at `docs/brief.md`, then the Product Contract below, then the Planning Contract. Hard constraints from the brief: Python, REST submit and status, asynchronous inter-service communication, Docker Compose, small and well-tested over sprawling.
 - **Execution profile:** Greenfield monorepo. Every unit lands with its tests. Unit tests need no Docker; contract and end-to-end tests need Docker.
 - **Stop conditions:** Stop and ask if a settled decision proves infeasible, if a pinned dependency cannot be installed on Python 3.14, or if the end-to-end suite cannot be made deterministic with the outcome script.
 - **Who finishes:** The implementer completes all nine units, the Verification Contract passes, and the Definition of Done holds. The design record under `docs/` is updated when a decision changes during implementation.
-- **Product Contract preservation:** changed: R13 and R14 (undo now covers the failing stage as well as completed stages, chosen in planning dialogue); R15 (current stage exposed in `compensating` too); AE3, AE4, AE13 reworded to match; AE16 added. Outstanding Questions resolved in place into KTD2, KTD4, KTD11, KTD13. Revised 2026-10-14, after the first version (U1 to U9, with its own dispatcher and RabbitMQ adapter) and Celery and Dramatiq prototypes were compared (`docs/library-evaluation.md`): execution moves to Dramatiq, a stage that is down becomes a visible wait with a maximum, and a recorder becomes the only writer of order state. Changed: the Key Decisions on orchestration, the stuck-order sweep, statelessness, and storage; R5, R6, R7, R11, R22, R25; new R29; AE10, AE14, AE16; KTD1 to KTD6, KTD9, KTD10, KTD15. The Implementation Units describe the first version as it was built.
+- **Product Contract preservation:** changed: R13 and R14 (undo now covers the failing stage as well as completed stages, chosen in planning dialogue); R15 (current stage exposed in `compensating` too); AE3, AE4, AE13 reworded to match; AE16 added. Outstanding Questions resolved in place into KTD2, KTD4, KTD11, KTD13. Revised 2026-10-14, after the first version (U1 to U9, with its own dispatcher and RabbitMQ adapter) and Celery and Dramatiq prototypes were compared (`docs/library-evaluation.md`): execution moves to Dramatiq, a stage that is down becomes a visible wait with a maximum, and a recorder makes every change to order state after submission. Changed: the Key Decisions on orchestration, the stuck-order sweep, statelessness, and storage; R5, R6, R7, R11, R22, R25; new R29; AE10, AE14, AE16; KTD1 to KTD6, KTD9, KTD10, KTD15. The Implementation Units describe the first version as it was built.
 
 ---
 
@@ -42,8 +42,8 @@ The evaluation targets that middle layer. The stage logic is simulated on purpos
 - **RabbitMQ over Redis.** (session-settled: user-approved — chosen over Redis: losing a stage message or an event is unacceptable here, and RabbitMQ confirms a persistent message only once it is on disk; Redis is the right choice when latency is the top priority.) Governs R5. Stage messages are acknowledged after processing, published with confirms, and dead-lettered when they fail.
 - **Order row plus append-only attempt log.** The order row carries the current state, the current stage, and when its current work started waiting. Every execute and undo attempt appends a row. The recorder applies each transition, one event per transaction, and its writes are guarded so a late or duplicate event cannot move an order back. (session-settled: user-approved — chosen over an event-sourced log with a projection: the history the UI needs comes from the attempt log, and the event log adds fold and projection code for the same visible behaviour.) Governs R8, R15, R16.
 - **One container per stage, from one template.** Each stage runs as its own service. All stage services are built from one base package that owns the broker consumer, the result publisher, the failure simulator, and the handler contract. (session-settled: user-directed — chosen over one API container plus one worker pool: the user wants the reviewer to see separate services communicating asynchronously.) Governs R4, R18.
-- **Postgres, not SQLite.** SQLite would hold this version's data, since the recorder is the only writer, but the recorder's guards and the status read rely on row locks and `REPEATABLE READ` snapshots, SQLite serializes every write on one file, and a database file on a Docker volume ties the data to one host. Governs R8.
-- **Stage services are stateless.** Stage workers have no database access. A message carries everything a stage needs, including the order's plan and, for an undo, the output of the execute it reverses; the worker reports each attempt as an event. The recorder is the only writer of order state; the API creates orders and reads status. Governs R6, R23.
+- **Postgres, not SQLite.** SQLite would hold this version's data, since writes are an insert per order plus one recorder, but the recorder's guards and the status read rely on row locks and `REPEATABLE READ` snapshots, SQLite serializes every write on one file, and a database file on a Docker volume ties the data to one host. Governs R8.
+- **Stage services are stateless.** Stage workers have no database access. A message carries everything a stage needs, including the order's plan and, for an undo, the output of the execute it reverses; the worker reports each attempt as an event. The API inserts each new order and reads status; the recorder makes every other change to order state. Governs R6, R23.
 - **Client idempotency key on submission.** A resubmitted order with the same key returns the existing order and does not start a second pipeline run. (session-settled: user-approved — chosen over server-generated ids with duplicates allowed, and over payload hashing, which collides on legitimate identical orders.) Governs R9, R26.
 - **Observability is the attempt history and the timeline page.** Structured logs and metrics are deferred. (session-settled: user-directed — chosen over structured logs and a metrics endpoint: the user limited this version to stage history in the status API and the UI.) Governs R15, R16, R17, R27, R28.
 - **A stage that is down is a bounded, visible wait.** Every stage message is stamped with the time it becomes available to a worker, and the order records the same moment. While no worker takes the work, no attempt is spent and status shows the wait. A watcher in the orchestrator gives up an order whose work waited past the stage's maximum: the stages that ran are undone in reverse and the order ends with a reason. A worker drops work that waited past the maximum, so a stage that returns late does not act for an order that moved on. An order whose first message never reached the queue is ended the same way. (session-settled: user-directed, 2026-10-14 — chosen over timing out attempts while a stage is down, which spent the retry budget on an outage and needed the orchestrator to track every send.) Governs R11, R22, R25, R29.
@@ -136,12 +136,14 @@ The evaluation targets that middle layer. The stage logic is simulated on purpos
 ```mermaid
 stateDiagram-v2
   [*] --> pending: submitted
-  pending --> running: first stage dispatched
+  pending --> running: first stage started
+  pending --> failed: no worker took the first stage within its maximum wait
   running --> running: stage succeeded, next stage
   running --> completed: last stage succeeded
-  running --> compensating: permanent failure
+  running --> compensating: rejected, attempts exhausted, or a stage not taken within its maximum wait
+  compensating --> compensating: undo succeeded, next undo
   compensating --> failed: all undos succeeded
-  compensating --> compensation_failed: an undo rejected or exhausted
+  compensating --> compensation_failed: an undo rejected, exhausted, or not taken within its maximum wait
   completed --> [*]
   failed --> [*]
   compensation_failed --> [*]
@@ -231,7 +233,7 @@ Components.
 ```mermaid
 flowchart TB
   client[Client or timeline page] -->|HTTP| api[Orchestrator API and wait watcher]
-  api -->|create order, read status| pg[(Postgres)]
+  api -->|create order, read status and waiting orders| pg[(Postgres)]
   api -->|pipeline of stage messages, give-up events| mq[(RabbitMQ)]
   mq -->|stage.inventory, stage.fraud, stage.shipping| w[Stage workers]
   w -->|next stage, retries, attempt events| mq
@@ -255,7 +257,7 @@ sequenceDiagram
   W->>B: event started
   W->>W: simulator decides, handler runs, deadline checked from start
   W->>B: event succeeded, retry, or failed
-  W->>B: on success Dramatiq enqueues the next stage; on retry, the same message after its delay
+  W->>B: on success Dramatiq enqueues the next stage, on retry the same message after its delay
   B->>R: deliver events in order
   R->>S: guarded write of attempt and order, waiting_since for the next handoff
   R->>B: on a permanent failure, the undo pipeline
@@ -293,7 +295,7 @@ services/
       ports/                   # store.py (Protocol)
       adapters/                # memory_store.py, postgres_store.py
       app/                     # api.py, config.py, lifespan.py, schemas.py, workflow.py (pipeline and watcher)
-      recorder.py              # Dramatiq actor, the only writer of order state
+      recorder.py              # Dramatiq actor, makes every change to order state
       static/index.html
     tests/
   stage/

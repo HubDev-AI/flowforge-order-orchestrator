@@ -24,7 +24,7 @@ The Celery prototype is on branch `experiment/celery-rewrite` (pull request #16)
 | Execution layer (dispatcher, results, bus, runner; or the library integration) | 695 | 421 | 698 |
 | Test lines | 3,714 | 1,895 | 2,210 |
 
-The Dramatiq version is larger than the Celery prototype because it keeps a single database writer (the recorder, its events, and its guards for late events) and implements the waiting policy. Without that policy it was 1,349 lines.
+The Dramatiq version is larger than the Celery prototype because one recorder makes every change to order state (the recorder, its events, and its guards for late events) and implements the waiting policy. Without that policy it was 1,349 lines.
 
 ## End-to-end results
 

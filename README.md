@@ -7,7 +7,7 @@ An order is submitted through a REST API and runs through a configurable sequenc
 ```mermaid
 flowchart TB
   client[Browser timeline page or API client] -->|HTTP| api[Orchestrator API and wait watcher]
-  api -->|create order, read status| pg[(Postgres)]
+  api -->|create order, read status and waiting orders| pg[(Postgres)]
   api -->|pipeline of stage messages, give-up events| mq[(RabbitMQ)]
   mq -->|stage.inventory| s1[Stage worker: inventory]
   mq -->|stage.fraud| s2[Stage worker: fraud]
@@ -20,7 +20,7 @@ flowchart TB
 
 - **Orchestrator** (FastAPI). Serves the API and the timeline page. Submitting an order stores it in Postgres and enqueues a [Dramatiq](https://dramatiq.io) pipeline with one message per stage. A background loop, the wait watcher, gives up orders whose work no worker took within the stage's maximum wait.
 - **Stage workers.** One container per stage, all from one image; `STAGE_NAME` picks the handler and the queue. Dramatiq hands each worker its stage's messages, chains to the next stage on success, and retries with the delay the worker asks for. Workers hold no state and have no database access: they report each attempt as an event.
-- **Recorder.** Run from the orchestrator image, it consumes the attempt events and is the only writer of order state and history. When an order must be compensated, it enqueues the undo pipeline.
+- **Recorder.** Run from the orchestrator image, it consumes the attempt events and makes every change to order state and history; the API only inserts a new order. When an order must be compensated, it enqueues the undo pipeline.
 - **RabbitMQ** carries the stage messages (a durable queue per stage) and the events (one queue), with publisher confirms. **Postgres** holds each order and an append-only log of every attempt, which is the history the API and the page show.
 
 An order's life: submit (`pending`), the first stage starts (`running`), each success hands the order to the next stage, and the last success completes it. A transient failure or an answer after the stage's deadline is retried with backoff up to a cap. A rejection or exhausted attempts undo every stage that ran, in reverse, and the order ends `failed` (every undo succeeded) or `compensation_failed` (an undo gave up). If no worker picks up a stage's work, the order shows that it is waiting; after the stage's maximum wait (60 s by default) it is given up the same way.
@@ -186,9 +186,9 @@ The reasoning behind each choice and the alternatives that were rejected are in 
 |---|---|---|
 | Dramatiq runs the stages; the application owns the recovery policy | Chaining, retries with backoff, acknowledgement after processing, and redelivery come from a library; the code that remains is the policy | Retry state lives in the broker; Dramatiq's `AgeLimit` and `on_failure` do not fit the policy and are replaced by a handoff stamp and the recorder |
 | A stage that is down is a visible wait with a maximum, not failed attempts | An outage never spends the retry budget, the page says what the order is waiting for, and stale work is dropped when the stage returns | An order waits up to the stage's maximum (60 s by default) before it is given up |
-| One recorder writes all order state, from attempt events | Stage workers need no database access, and one consumer applies events in order | State lags each attempt by one hop through the queue; one recorder instance only |
+| One recorder makes every change to an order after it is created, from attempt events | Stage workers need no database access, and one consumer applies events in order | State lags each attempt by one hop through the queue; one recorder instance only |
 | RabbitMQ rather than Redis, with publisher confirms | Losing a stage message or an event is unacceptable here; RabbitMQ confirms a message only once it is on disk | A confirm can take a few hundred milliseconds; Redis is the right choice when latency is the top priority and losing the last second of messages is tolerable |
-| An order row plus an append-only attempt log, in Postgres | The visible history is the log; the recorder's guards and the status read use row locks and `REPEATABLE READ` snapshots | No event replay or time-travel, and one more service to run. SQLite would hold this version's data, since one recorder is the only writer, but it has no row locks and serializes every write on one file |
+| An order row plus an append-only attempt log, in Postgres | The visible history is the log; the recorder's guards and the status read use row locks and `REPEATABLE READ` snapshots | No event replay or time-travel, and one more service to run. SQLite would hold this version's data, since writes are an insert per order plus one recorder, but it has no row locks and serializes every write on one file |
 | Undo hooks on every stage, defaulting to a no-op | The compensation path exists and is tested even though simulated stages have no side effects | Extra moving parts for work that is, today, simulated |
 | At-least-once delivery, idempotent handlers, and guarded writes in the recorder | A duplicate or late event cannot change the order, and a redelivered message restarts the same attempt | Stage handlers must be idempotent per order and stage |
 | One stage image selected by `STAGE_NAME`; the stage list and each stage's policy copied onto every order | Adding a stage is a handler, a Compose service, and a config line; in-flight orders are unaffected by config changes | An order in flight keeps its old stage list, so a removed stage's service must keep running until those orders are done |
