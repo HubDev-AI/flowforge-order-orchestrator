@@ -57,8 +57,8 @@ The transitions are a pure function, `transition(order, event, policy)`, that im
 |---|---|
 | Linear pipeline ordered by config; an order copies the stage list at submission | Per-order-type pipelines, conditional skips, a DAG: each multiplies the state model and the test surface, and no current stage needs them |
 | An undo handler on every stage, default a no-op; a permanent failure undoes every dispatched stage in reverse, the failing stage included | No compensation; declaring undo-capable stages in orchestrator config, which would make the orchestrator know about stages |
-| Own orchestrator over a message broker | Postgres as the queue (couples every stage to the schema); Temporal (would implement the orchestration the brief says is being evaluated) |
-| RabbitMQ | Redis Streams: RabbitMQ has native acknowledgement and durable queues, so less plumbing to write and test |
+| Own orchestrator over a message broker | Postgres as the queue (couples every stage to the schema); an off-the-shelf engine such as Temporal (the orchestration is the core of this system, so it stays in our code; see "Build or adopt the orchestrator" below) |
+| RabbitMQ | Redis: losing a command or a result is unacceptable here, and RabbitMQ confirms a message only once it is on disk; Redis wins when latency comes first (see "Broker: RabbitMQ or Redis" below) |
 | Order row plus an append-only attempt log | Event sourcing with a projection: the history the UI needs is the attempt log, and the event log adds fold and projection code for the same visible behaviour |
 | One container per stage, built from one image, handler chosen by `STAGE_NAME` | One API container plus a worker pool (the separate services are the point); one image per stage (three Dockerfiles for identical code) |
 | Postgres | SQLite: not safe for concurrent writers from separate processes over a shared volume |
@@ -74,6 +74,43 @@ The transitions are a pure function, `transition(order, event, policy)`, that im
 | Pipeline config in TOML, read with `tomllib` and validated at startup | Environment variables, which do not express an ordered list with per-stage overrides |
 | A static page with no build step, served by the orchestrator | A frontend toolchain |
 | Three test layers: unit with in-memory adapters, contract tests per port run against every adapter, end-to-end against Compose | Mocking the broker and the database in the orchestrator tests |
+
+## Build or adopt the orchestrator
+
+Workflow engines that do this job exist, and the architect weighed them before deciding to build. The orchestration, the state model, and the attempt history are the core of this system, so they are kept in our own code: every rule is one pure function under unit test, the whole flow is readable in one place, and there is no second platform to run, upgrade, or learn. The cost is that we own retry, timeout, and compensation logic an engine would provide, and the system runs as one orchestrator instance. The decision is revisited when any of these becomes true: more than one orchestrator instance is needed, there are several workflow types, workflows wait on people for hours or days, or running workflows must survive a change to their own code.
+
+| Kind | Examples | Fit for this workflow |
+|---|---|---|
+| Durable-execution engines | Temporal (Python SDK), Cadence, Restate, DBOS, Hatchet, Inngest | Closest match. The workflow is plain code; the engine persists every step, retries, enforces timeouts, and survives restarts. Sagas with compensation are a documented pattern |
+| Workflow engines with a modelled flow | Camunda/Zeebe, Netflix Conductor (Orkes), AWS Step Functions, Azure Durable Functions | The same guarantees, with the flow defined as a diagram or JSON instead of code. The cloud services tie the system to one provider |
+| Task queues with chaining | Celery chains and chords, Dramatiq pipelines | Steps run in sequence, but there is no durable per-order state, no compensation, and no history; what this repository builds would still be needed on top |
+| Saga frameworks | MassTransit, NServiceBus (.NET), Axon (Java) | Good saga support, outside the Python stack |
+| Data pipelines | Airflow, Prefect, Dagster | Built for scheduled batch jobs, not one workflow per incoming order |
+
+If the decision flips, Temporal is the first candidate, and each part of this design has a direct counterpart:
+
+| This design | Temporal equivalent |
+|---|---|
+| Order row plus append-only attempt log | Workflow event history |
+| Dispatcher sweep, due times, deadlines | Durable timers and activity timeouts |
+| `max_attempts` and backoff in `config/pipeline.toml` | Activity retry policy |
+| Undo of every dispatched stage in reverse | Saga compensation in workflow code |
+| Guarded close that drops a stale result | Built in: a late activity result is never applied |
+| Timeline page | Temporal Web UI |
+
+What Temporal would cost: a Temporal cluster and its database to operate (or Temporal Cloud), deterministic workflow code with explicit versioning rules when the workflow changes, and the orchestration logic moving from readable application code into the engine's behaviour. The pure `transition` function and its tests would remain the specification of the workflow.
+
+## Broker: RabbitMQ or Redis
+
+| | RabbitMQ (chosen) | Redis |
+|---|---|---|
+| Right choice when | losing a message is unacceptable | latency is the top priority |
+| When a publish is confirmed | for a persistent message on a durable queue, only after it is written to disk | as soon as it is in memory; written to disk afterwards, unless `appendfsync always` is set, which Redis's documentation calls very slow |
+| On a broker crash | confirmed messages survive | with AOF fsync every second (the recommended setting), up to one second of acknowledged writes is lost; with RDB snapshots alone, minutes |
+| Latency | a confirm can take a few hundred milliseconds under load, because writes to disk are batched | sub-millisecond |
+| Work-queue model | durable queues, competing consumers, acknowledgements, and a management view out of the box | Streams provide consumer groups, `XACK`, and `XAUTOCLAIM`; group layout, recovery, and trimming are left to the application |
+
+This system is in the first column. A lost command or result costs the order a full attempt and a deadline window before the sweep notices, and a lost result may hide work a stage already did, which then has to be undone. Commands are a few per order and each stage takes hundreds of milliseconds, so the broker's confirm latency is not on the critical path. Redis is the right choice for a system that needs the lowest latency and can tolerate losing the last second of messages, such as caching, live notifications, or rate limiting. The bus port keeps the choice open: a Redis Streams adapter would run the same bus contract suite.
 
 ## Where the implementation refined the plan
 
