@@ -28,7 +28,7 @@ class StagePolicy:
     max_attempts: int
     backoff_base: timedelta
     backoff_cap: timedelta
-    dispatch_deadline: timedelta
+    deadline: timedelta
     max_wait: timedelta
 
 
