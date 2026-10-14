@@ -1,5 +1,8 @@
+from datetime import timedelta
+
 import pytest
 from orchestrator.domain.errors import DuplicateIdempotencyKey
+from orchestrator.domain.models import OrderState
 
 
 async def test_created_order_is_returned_intact(store, make_order):
@@ -28,3 +31,16 @@ async def test_a_new_order_is_read_back_with_an_empty_history(store, make_order)
 
     assert await store.get_order_with_attempts(order.id) == (order, [])
     assert await store.get_order_with_attempts(make_order().id) is None
+
+
+async def test_waiting_orders_are_the_unfinished_ones_handed_off_oldest_first(
+    store, make_order, now
+):
+    older = make_order(waiting_since=now - timedelta(seconds=30))
+    newer = make_order(waiting_since=now)
+    executing = make_order(state=OrderState.RUNNING, waiting_since=None)
+    finished = make_order(state=OrderState.COMPLETED, waiting_since=now)
+    for order in (newer, older, executing, finished):
+        await store.create_order(order)
+
+    assert [o.id for o in await store.waiting_orders(10)] == [older.id, newer.id]

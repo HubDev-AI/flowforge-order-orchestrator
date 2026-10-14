@@ -1,6 +1,6 @@
 # flowforge-order-orchestrator
 
-> **Experiment branch.** This branch runs the stages on Dramatiq instead of the orchestrator's own dispatcher, to compare the two. It is not for merge. What changed, the end-to-end results, and how it compares with Celery are in [`docs/dramatiq-experiment.md`](docs/dramatiq-experiment.md). The rest of this README describes `main`. When switching to or from this branch, run `docker compose down -v` first: each version declares its RabbitMQ queues differently, and RabbitMQ refuses to redeclare a queue with other arguments.
+> **Experiment branch.** This branch runs the stages on Dramatiq instead of the orchestrator's own dispatcher, and treats a stage that is down as a visible wait with a maximum instead of failed attempts, to compare the two designs. It is not for merge. What changed, the end-to-end results, and how it compares with Celery are in [`docs/dramatiq-experiment.md`](docs/dramatiq-experiment.md). The rest of this README describes `main`. When switching to or from this branch, run `docker compose down -v` first: each version declares its RabbitMQ queues differently, and RabbitMQ refuses to redeclare a queue with other arguments.
 
 An order is submitted through a REST API and runs through a configurable sequence of slow, sometimes failing stages (inventory, fraud, shipping) until it lands in a terminal state. Anyone can ask where an order is and how it got there, in the API or on a small timeline page. The stages are simulated; the point is the orchestration, the state model, and the visibility of the workflow.
 

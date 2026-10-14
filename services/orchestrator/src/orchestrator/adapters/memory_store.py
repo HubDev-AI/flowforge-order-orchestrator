@@ -1,7 +1,7 @@
 from uuid import UUID
 
 from orchestrator.domain.errors import DuplicateIdempotencyKey
-from orchestrator.domain.models import Attempt, Order
+from orchestrator.domain.models import ACTIVE_STATES, Attempt, Order
 
 
 class MemoryStore:
@@ -29,3 +29,13 @@ class MemoryStore:
     async def get_order_with_attempts(self, order_id: UUID) -> tuple[Order, list[Attempt]] | None:
         order = self._orders.get(order_id)
         return None if order is None else (order, list(self._attempts[order_id]))
+
+    async def waiting_orders(self, limit: int) -> list[Order]:
+        waiting = [
+            order
+            for order in self._orders.values()
+            if order.waiting_since is not None
+            and order.state in ACTIVE_STATES
+            and not any(a.is_open for a in self._attempts[order.id])
+        ]
+        return sorted(waiting, key=lambda order: order.waiting_since)[:limit]

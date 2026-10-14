@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from orchestrator.domain.errors import DuplicateIdempotencyKey
-from orchestrator.domain.models import Attempt, Order, OrderState
+from orchestrator.domain.models import ACTIVE_STATES, Attempt, Order, OrderState
 
 IDEMPOTENCY_KEY_CONSTRAINT = "uq_orders_idempotency_key"
 
@@ -29,6 +29,7 @@ orders = sa.Table(
     sa.Column("terminal_reason", sa.Text),
     sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False),
     sa.Column("updated_at", sa.TIMESTAMP(timezone=True), nullable=False),
+    sa.Column("waiting_since", sa.TIMESTAMP(timezone=True)),
 )
 
 attempts = sa.Table(
@@ -62,6 +63,7 @@ def _order(row: sa.Row) -> Order:
         terminal_reason=row.terminal_reason,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        waiting_since=row.waiting_since,
     )
 
 
@@ -127,3 +129,20 @@ class PostgresStore:
                     .order_by(attempts.c.id)
                 )
                 return _order(row), [_attempt(a) for a in history]
+
+    async def waiting_orders(self, limit: int) -> list[Order]:
+        running = sa.exists().where(
+            attempts.c.order_id == orders.c.id, attempts.c.finished_at.is_(None)
+        )
+        async with self._engine.connect() as connection:
+            rows = await connection.execute(
+                sa.select(orders)
+                .where(
+                    orders.c.waiting_since.is_not(None),
+                    orders.c.state.in_([state.value for state in ACTIVE_STATES]),
+                    ~running,
+                )
+                .order_by(orders.c.waiting_since)
+                .limit(limit)
+            )
+            return [_order(row) for row in rows]

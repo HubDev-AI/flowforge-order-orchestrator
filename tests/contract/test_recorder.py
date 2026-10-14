@@ -13,6 +13,7 @@ POLICY = {
     "backoff_base_seconds": 1.0,
     "backoff_cap_seconds": 30.0,
     "deadline_seconds": 10.0,
+    "max_wait_seconds": 60.0,
 }
 PLAN = [{"name": name, "policy": POLICY} for name in ("inventory", "fraud")]
 SUBMISSION = {"payload": {"sku": "A-1"}}
@@ -99,8 +100,8 @@ async def test_a_failed_execute_starts_compensation_with_each_stage_output(recor
     start(order_id, "fraud", "execute", 1, now)
     recorder.fail(order_id, PLAN, 1, "execute", 1, Outcome.REJECTED, "no", now, SUBMISSION)
 
-    [(compensated_order, plan, position, submission, outputs)] = compensations
-    assert (compensated_order, position, submission) == (order_id, 1, SUBMISSION)
+    [(compensated_order, plan, positions, submission, outputs)] = compensations
+    assert (compensated_order, positions, submission) == (order_id, [1, 0], SUBMISSION)
     assert outputs == {0: {"reservation_id": "r-1"}, 1: None}
 
 
@@ -150,3 +151,71 @@ async def test_an_undo_that_gives_up_ends_in_compensation_failed_with_both_reaso
 
     assert order.state is OrderState.COMPENSATION_FAILED
     assert order.terminal_reason == "fraud rejected: no; undo of fraud exhausted: stuck"
+
+
+async def test_each_handoff_records_when_the_work_started_waiting(recorded):
+    order_id, read, now = recorded
+    later = now + timedelta(seconds=3)
+    start(order_id, "inventory", "execute", 1, now)
+    started, _ = await read()
+    recorder.succeed(order_id, PLAN, 0, "execute", 1, None, later)
+    handed_off, _ = await read()
+
+    assert started.waiting_since is None
+    assert handed_off.waiting_since == later
+
+
+async def test_giving_up_a_stage_that_never_ran_undoes_only_the_stages_before_it(
+    recorded, compensations
+):
+    order_id, read, now = recorded
+    start(order_id, "inventory", "execute", 1, now)
+    recorder.succeed(order_id, PLAN, 0, "execute", 1, {"reservation_id": "r-1"}, now)
+
+    recorder.give_up(order_id, PLAN, 1, "execute", now, now, SUBMISSION)
+
+    order, _ = await read()
+    [(_, _, positions, _, outputs)] = compensations
+    assert (order.state, order.current_stage) == (OrderState.COMPENSATING, "inventory")
+    assert order.terminal_reason == "fraud unavailable: no worker took it within 60 s"
+    assert (positions, outputs) == ([0], {0: {"reservation_id": "r-1"}})
+
+
+async def test_giving_up_before_any_stage_ran_fails_the_order_with_nothing_to_undo(
+    recorded, compensations
+):
+    order_id, read, now = recorded
+    order, _ = await read()
+
+    recorder.give_up(order_id, PLAN, 0, "execute", order.waiting_since, now, SUBMISSION)
+
+    order, _ = await read()
+    assert (order.state, order.current_stage) == (OrderState.FAILED, None)
+    assert compensations == []
+
+
+async def test_giving_up_an_undo_ends_in_compensation_failed(recorded):
+    order_id, read, now = recorded
+    start(order_id, "fraud", "execute", 1, now)
+    recorder.fail(order_id, PLAN, 1, "execute", 1, Outcome.REJECTED, "no", now, SUBMISSION)
+
+    recorder.give_up(order_id, PLAN, 1, "undo", now, now, SUBMISSION)
+
+    order, _ = await read()
+    assert order.state is OrderState.COMPENSATION_FAILED
+    assert order.terminal_reason.endswith(
+        "undo of fraud unavailable: no worker took it within 60 s"
+    )
+
+
+async def test_a_give_up_for_a_wait_that_already_ended_changes_nothing(recorded, compensations):
+    order_id, read, now = recorded
+    start(order_id, "inventory", "execute", 1, now)
+    recorder.succeed(order_id, PLAN, 0, "execute", 1, None, now)
+    start(order_id, "fraud", "execute", 1, now + timedelta(seconds=1))
+
+    recorder.give_up(order_id, PLAN, 1, "execute", now, now, SUBMISSION)
+
+    order, _ = await read()
+    assert order.state is OrderState.RUNNING
+    assert compensations == []

@@ -11,6 +11,8 @@ from contracts import (
     STAGE_ACTOR,
     Command,
     CommandKind,
+    DropAfterMaxWait,
+    HandOffStamp,
     Outcome,
     OutcomeScript,
     ScriptToken,
@@ -32,6 +34,8 @@ DEADLINE_PASSED = "deadline passed"
 _url = os.environ.get("RABBITMQ_URL")
 broker = RabbitmqBroker(url=_url, confirm_delivery=True) if _url else StubBroker()
 broker.add_middleware(CurrentMessage())
+broker.add_middleware(HandOffStamp())
+broker.add_middleware(DropAfterMaxWait())
 dramatiq.set_broker(broker)
 
 

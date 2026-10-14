@@ -26,7 +26,9 @@ def launched(monkeypatch):
 
 
 def test_compensation_undoes_every_dispatched_stage_in_reverse_with_its_output(launched):
-    recorder.compensate("o-1", PLAN, 1, {"payload": {}}, {0: {"reservation_id": "r-1"}, 1: None})
+    recorder.compensate(
+        "o-1", PLAN, [1, 0], {"payload": {}}, {0: {"reservation_id": "r-1"}, 1: None}
+    )
 
     [messages] = launched
     assert [(m.queue_name, m.kwargs["kind"]) for m in messages] == [

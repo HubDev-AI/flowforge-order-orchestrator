@@ -18,3 +18,8 @@ class OrderStore(Protocol):
     async def get_order_with_attempts(self, order_id: UUID) -> tuple[Order, list[Attempt]] | None:
         """The order and its attempts in start order, read from one snapshot."""
         ...
+
+    async def waiting_orders(self, limit: int) -> list[Order]:
+        """Unfinished orders whose current work is handed off but has no attempt running,
+        oldest wait first."""
+        ...

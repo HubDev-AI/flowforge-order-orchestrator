@@ -144,6 +144,7 @@
       <p id="terminal-reason" class="meta" hidden></p>
     </div>
     <p id="retry-banner" class="banner" hidden></p>
+    <p id="waiting-banner" class="banner" hidden></p>
     <p id="connection-notice" class="notice" role="status" hidden>
       Connection lost. Showing the last known timeline and retrying.
     </p>
@@ -275,6 +276,14 @@
     if (order.next_attempt_due_at) {
       banner.textContent =
         `Waiting to retry ${order.current_stage}. Next attempt due ${formatTime(order.next_attempt_due_at)}.`;
+    }
+    const waiting = $("waiting-banner");
+    waiting.hidden = !order.waiting_for_worker_since;
+    if (order.waiting_for_worker_since) {
+      const work = order.state === "compensating" ? "undo" : "work";
+      waiting.textContent =
+        `Waiting since ${formatTime(order.waiting_for_worker_since)} for a ` +
+        `${order.current_stage || "first stage"} worker to pick up the ${work}.`;
     }
     $("timeline").replaceChildren(...order.attempts.map(attemptItem));
   }

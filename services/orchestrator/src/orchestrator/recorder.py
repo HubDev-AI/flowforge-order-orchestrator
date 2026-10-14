@@ -12,13 +12,23 @@ from typing import Any
 
 import dramatiq
 import psycopg
-from contracts import RECORD_ACTOR, RECORDS_QUEUE, CommandKind, Outcome, stage_message
+from contracts import (
+    RECORD_ACTOR,
+    RECORDS_QUEUE,
+    CommandKind,
+    HandOffStamp,
+    Outcome,
+    stage_message,
+)
 from dramatiq.brokers.rabbitmq import RabbitmqBroker
 from dramatiq.brokers.stub import StubBroker
 from psycopg.types.json import Jsonb
 
+ACTIVE = {"pending", "running", "compensating"}
+
 _url = os.environ.get("RABBITMQ_URL")
 broker = RabbitmqBroker(url=_url, confirm_delivery=True) if _url else StubBroker()
+broker.add_middleware(HandOffStamp())
 dramatiq.set_broker(broker)
 
 
@@ -47,7 +57,8 @@ def start(
         if opened:
             connection.execute(
                 "UPDATE orders SET state = %s, current_stage = %s, current_kind = %s,"
-                " next_due_at = NULL, updated_at = %s WHERE id = %s",
+                " next_due_at = NULL, waiting_since = NULL, updated_at = %s"
+                " WHERE id = %s AND state IN ('pending', 'running', 'compensating')",
                 (state, stage, kind, started_at, order_id),
             )
 
@@ -115,8 +126,8 @@ def succeed(
         _close(connection, order_id, stage, kind, attempt, Outcome.SUCCEEDED, None, output, at)
         connection.execute(
             "UPDATE orders SET state = %s, current_stage = %s, current_kind = %s,"
-            " next_due_at = NULL, updated_at = %s WHERE id = %s",
-            (state, current, None if current is None else kind, at, order_id),
+            " next_due_at = NULL, waiting_since = %s, updated_at = %s WHERE id = %s",
+            (state, current, None if current is None else kind, current and at, at, order_id),
         )
 
 
@@ -133,8 +144,8 @@ def retry(
     with _connect() as connection:
         _close(connection, order_id, stage, kind, attempt, outcome, reason, None, at)
         connection.execute(
-            "UPDATE orders SET next_due_at = %s, updated_at = %s WHERE id = %s",
-            (due_at, at, order_id),
+            "UPDATE orders SET next_due_at = %s, waiting_since = %s, updated_at = %s WHERE id = %s",
+            (due_at, due_at, at, order_id),
         )
 
 
@@ -157,7 +168,7 @@ def fail(
         if kind != CommandKind.EXECUTE:
             connection.execute(
                 "UPDATE orders SET state = 'compensation_failed', current_stage = NULL,"
-                " current_kind = NULL, next_due_at = NULL,"
+                " current_kind = NULL, next_due_at = NULL, waiting_since = NULL,"
                 " terminal_reason = concat_ws('; ', terminal_reason, %s::text), updated_at = %s"
                 " WHERE id = %s",
                 (f"undo of {summary}", at, order_id),
@@ -166,23 +177,82 @@ def fail(
         connection.execute(
             "UPDATE orders SET state = 'compensating', current_stage = %s,"
             " current_kind = 'undo', next_due_at = NULL, terminal_reason = %s,"
-            " updated_at = %s WHERE id = %s",
-            (stage, summary, at, order_id),
+            " waiting_since = %s, updated_at = %s WHERE id = %s",
+            (stage, summary, at, at, order_id),
         )
-        outputs = {
-            p: execute_output(connection, order_id, plan[p]["name"]) for p in range(position + 1)
-        }
-    compensate(order_id, plan, position, submission, outputs)
+        undo = list(range(position, -1, -1))
+        outputs = {p: execute_output(connection, order_id, plan[p]["name"]) for p in undo}
+    compensate(order_id, plan, undo, submission, outputs)
+
+
+def give_up(
+    order_id: str,
+    plan: list[dict[str, Any]],
+    position: int,
+    kind: str,
+    waiting_since: datetime,
+    at: datetime,
+    submission: dict[str, Any],
+) -> None:
+    """No worker took the order's current work within the stage's max wait.
+
+    Applies only if the order is still waiting on the same handoff with nothing running. A
+    waiting execute is undone only if it ever ran; the stages before it are undone in reverse.
+    """
+    stage = plan[position]["name"]
+    max_wait = plan[position]["policy"]["max_wait_seconds"]
+    summary = f"{stage} unavailable: no worker took it within {max_wait:g} s"
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT state, waiting_since FROM orders WHERE id = %s FOR UPDATE", (order_id,)
+        ).fetchone()
+        if row is None or row[0] not in ACTIVE or row[1] != waiting_since:
+            return
+        running = connection.execute(
+            "SELECT 1 FROM attempts WHERE order_id = %s AND finished_at IS NULL", (order_id,)
+        ).fetchone()
+        if running:
+            return
+        if kind != CommandKind.EXECUTE:
+            connection.execute(
+                "UPDATE orders SET state = 'compensation_failed', current_stage = NULL,"
+                " current_kind = NULL, next_due_at = NULL, waiting_since = NULL,"
+                " terminal_reason = concat_ws('; ', terminal_reason, %s::text), updated_at = %s"
+                " WHERE id = %s",
+                (f"undo of {summary}", at, order_id),
+            )
+            return
+        ran = connection.execute(
+            "SELECT 1 FROM attempts WHERE order_id = %s AND stage = %s AND kind = 'execute'",
+            (order_id, stage),
+        ).fetchone()
+        undo = list(range(position if ran else position - 1, -1, -1))
+        if not undo:
+            connection.execute(
+                "UPDATE orders SET state = 'failed', current_stage = NULL, current_kind = NULL,"
+                " next_due_at = NULL, waiting_since = NULL, terminal_reason = %s,"
+                " updated_at = %s WHERE id = %s",
+                (summary, at, order_id),
+            )
+            return
+        connection.execute(
+            "UPDATE orders SET state = 'compensating', current_stage = %s, current_kind = 'undo',"
+            " next_due_at = NULL, waiting_since = %s, terminal_reason = %s, updated_at = %s"
+            " WHERE id = %s",
+            (plan[undo[0]]["name"], at, summary, at, order_id),
+        )
+        outputs = {p: execute_output(connection, order_id, plan[p]["name"]) for p in undo}
+    compensate(order_id, plan, undo, submission, outputs)
 
 
 def compensate(
     order_id: str,
     plan: list[dict[str, Any]],
-    position: int,
+    positions: list[int],
     submission: dict[str, Any],
     outputs: dict[int, Any],
 ) -> None:
-    """Undo every dispatched stage in reverse, the failing one first, each with its own output."""
+    """Undo the given stages in the order given, each with the output of its execute."""
     undo = [
         stage_message(
             order_id=order_id,
@@ -192,7 +262,7 @@ def compensate(
             submission=submission,
             prior_output=outputs.get(p),
         )
-        for p in range(position, -1, -1)
+        for p in positions
     ]
     dramatiq.pipeline(undo, broker=broker).run()
 
@@ -230,6 +300,16 @@ def record(event: dict[str, Any]) -> None:
                 event["reason"],
                 at,
                 datetime.fromisoformat(event["due_at"]),
+            )
+        case "gave_up":
+            give_up(
+                event["order_id"],
+                event["plan"],
+                event["position"],
+                event["kind"],
+                datetime.fromisoformat(event["waiting_since"]),
+                at,
+                event["submission"],
             )
         case "failed":
             fail(

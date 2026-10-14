@@ -20,6 +20,7 @@ def policy() -> StagePolicy:
         backoff_base=timedelta(seconds=1),
         backoff_cap=timedelta(seconds=30),
         dispatch_deadline=timedelta(seconds=10),
+        max_wait=timedelta(seconds=60),
     )
 
 
