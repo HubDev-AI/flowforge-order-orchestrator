@@ -3,7 +3,7 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
-from contracts.outcomes import CommandKind, Outcome
+from contracts.outcomes import CommandKind
 from contracts.script import OutcomeScript
 
 
@@ -27,9 +27,3 @@ class Command(AttemptKey):
         if self.kind is CommandKind.EXECUTE and self.prior_stage_output is not None:
             raise ValueError("prior_stage_output is only valid on an undo command")
         return self
-
-
-class Result(AttemptKey):
-    outcome: Outcome
-    reason: str | None = None
-    stage_output: dict[str, Any] | None = None

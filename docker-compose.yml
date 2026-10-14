@@ -9,8 +9,11 @@ x-stage: &stage
   depends_on:
     rabbitmq:
       condition: service_healthy
+    postgres:
+      condition: service_healthy
   environment: &stage-env
     RABBITMQ_URL: *rabbitmq-url
+    DATABASE_URL: postgresql://flowforge:flowforge@postgres:5432/flowforge
     STAGE_LATENCY_MIN_S: "0.1"
     STAGE_LATENCY_MAX_S: "0.5"
     STAGE_TRANSIENT_PROBABILITY: "0"
