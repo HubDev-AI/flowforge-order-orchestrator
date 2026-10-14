@@ -32,6 +32,7 @@ app = Celery("flowforge")
 app.conf.update(
     broker_url=os.environ.get("RABBITMQ_URL"),
     broker_connection_retry_on_startup=True,
+    broker_transport_options={"confirm_publish": True},
     task_acks_late=True,
     task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,

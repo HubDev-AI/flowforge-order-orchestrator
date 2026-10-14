@@ -47,6 +47,7 @@ The unit suite (98 tests) and the adapter contract suite (16 tests, against real
 - **No recovery of lost work.** If the API crashes between storing an order and sending its chain, the order stays `pending` for ever. If a task fails for an unexpected reason (a bug, or Postgres refusing the attempt record), the order stays in its last state. This happened during the build: a missing import path left orders in `running`. On `main` the sweep recovers both cases. A Celery beat job that finds stuck orders would be the fix; it is not built.
 - **Stage services are no longer stateless.** Every stage worker connects to Postgres and writes order state, and the recorder's SQL duplicates knowledge of the schema the orchestrator owns.
 - **Retry state lives in the broker.** A retry waiting out its backoff is a message held by a worker, not a due time on the order row.
+- **Publisher confirms are off by default.** Celery's RabbitMQ transport sends without waiting for the broker to confirm, so a publish can be lost silently; this branch turns them on with `broker_transport_options={"confirm_publish": True}` for both the API and the workers. `main` publishes with confirms.
 - **Celery's worker coordination is switched off.** Celery 5.6 declares transient, non-exclusive queues for remote control, mingle, and gossip; RabbitMQ 4.3 rejects them because the feature is deprecated, so the workers run without them, and `celery inspect` and `celery control` are unavailable.
 
 ## What is gained

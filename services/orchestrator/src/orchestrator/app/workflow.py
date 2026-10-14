@@ -48,7 +48,11 @@ def order_chain(app: Celery, order: Order, config: PipelineConfig):
 
 def celery_launcher(broker_url: str, config: PipelineConfig) -> Launcher:
     app = Celery("flowforge", broker=broker_url)
-    app.conf.update(task_serializer="json", broker_connection_retry_on_startup=True)
+    app.conf.update(
+        task_serializer="json",
+        broker_connection_retry_on_startup=True,
+        broker_transport_options={"confirm_publish": True},
+    )
 
     async def launch(order: Order) -> None:
         await asyncio.to_thread(order_chain(app, order, config).apply_async)
