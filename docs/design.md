@@ -83,9 +83,28 @@ Workflow engines that do this job exist, and the architect weighed them before d
 |---|---|---|
 | Durable-execution engines | Temporal (Python SDK), Cadence, Restate, DBOS, Hatchet, Inngest | Closest match. The workflow is plain code; the engine persists every step, retries, enforces timeouts, and survives restarts. Sagas with compensation are a documented pattern |
 | Workflow engines with a modelled flow | Camunda/Zeebe, Netflix Conductor (Orkes), AWS Step Functions, Azure Durable Functions | The same guarantees, with the flow defined as a diagram or JSON instead of code. The cloud services tie the system to one provider |
-| Task queues with chaining | Celery chains and chords, Dramatiq pipelines | Steps run in sequence, but there is no durable per-order state, no compensation, and no history; what this repository builds would still be needed on top |
+| Task queues with chaining | Celery chains and chords, Dramatiq pipelines | They run, retry, and chain tasks and track each task's status, but not the order's history; compensation is an error callback you write, and nothing notices work that is stuck or lost (see below) |
 | Saga frameworks | MassTransit, NServiceBus (.NET), Axon (Java) | Good saga support, outside the Python stack |
 | Data pipelines | Airflow, Prefect, Dagster | Built for scheduled batch jobs, not one workflow per incoming order |
+
+### Why a task queue is not enough: recovery
+
+The hard requirement in this system is not running a stage, retrying it, or chaining stages; every task queue does that. It is noticing when work has gone missing and getting the order moving again. Two failures define it:
+
+1. **Lost before it starts.** The API stores the order and then crashes before the work reaches the queue. The queue never had it, so nothing will ever run it, and the order says `pending` for ever.
+2. **Stuck or lost while running.** A stage is down, a worker dies mid-task, or a result never arrives. In a task queue the work sits in a queue or is simply gone, and the order says `running` for ever, because a queue measures nothing about an order.
+
+A task queue reacts to messages; it cannot react to the absence of one. Recovering from both failures needs something that knows what should have happened and by when, and looks at the clock. That is what this design is built around:
+
+- **The database is the to-do list.** Submitting an order only writes a row with a due time. The dispatcher picks up any order that is due and has no open attempt, so there is no separate "send" step to lose: a crash before the first dispatch just leaves a due order for the next sweep.
+- **Every attempt has a deadline.** It is set when the attempt is dispatched, so time spent waiting in a queue counts. The same sweep times out any open attempt past its deadline and schedules the next one, whatever the reason the answer never came.
+- **Late or stale work is harmless.** A stage drops a command whose deadline has passed, and the guarded close ignores a result for an attempt that is no longer open, so a retry can never be overtaken by the attempt it replaced.
+
+**The evidence.** The architect prototyped the alternative before settling this. Branch `experiment/celery-rewrite` (pull request #16, not merged) replaces the dispatcher, the results consumer, and the bus with Celery: one chained task per stage, Celery retries and time limits, and compensation from the chain's error callback. It removes about a third of the production code (1,915 lines to 1,249). The unchanged end-to-end suite passes 14 of its 15 tests; the one failure is the stage-that-is-down case, where the order waits in `running` with no attempt until the worker returns. A crash between storing an order and sending its chain, or an unexpected error in a task, also leaves the order where it was; the prototype hit the second one during the build. Fixing these on top of Celery means adding a periodic job, deadlines that include queue time, a record of what was sent, and a check that drops stale work: the dispatcher again.
+
+Dramatiq was checked against the same two failures. It suits this system better than Celery: it declares only durable queues, so it works with RabbitMQ 4.3 unchanged, acknowledges a message only after processing it, retries unexpected errors by default, and its `AgeLimit` drops a message that waited too long. But it has the same gap. `AgeLimit` only looks at a message when a worker takes it, so nothing notices while a stage is down, and a message it drops triggers no failure callback, so the order stops silently. Lost-before-it-starts is not covered either.
+
+**The decision.** Build the orchestrator, because recovery is the requirement and task queues leave it to the application. If a library is wanted later for running the stages, Dramatiq is the better fit, with this design's sweep kept on top. If the whole job is to be handed to a platform, Temporal covers both failures: when the order lives in the workflow itself there is no separate write to lose, and an activity's schedule-to-close timeout includes time waiting to be picked up.
 
 If the decision flips, Temporal is the first candidate, and each part of this design has a direct counterpart:
 

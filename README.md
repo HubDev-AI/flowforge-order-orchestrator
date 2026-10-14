@@ -210,7 +210,7 @@ The reasoning behind each choice, the alternatives that were rejected, and where
 | Clocks | Deadlines are absolute times set by the orchestrator and compared on the stage's clock | Containers must share a clock; a skew larger than the 10 ms margin lets a scripted timeout succeed early |
 | Availability | Submission needs the database only; progress needs the broker too | Orders accepted during a broker outage wait; nothing counts against them while the bus reports itself down; only a command that may have reached the broker is counted, as it may also run. |
 
-The comparison with off-the-shelf workflow engines (Temporal, Camunda, Step Functions, Celery, and others) and with Redis as the broker is in the design record, under "Build or adopt the orchestrator" and "Broker: RabbitMQ or Redis".
+Why the orchestrator is built rather than taken from a library is in the design record, under "Build or adopt the orchestrator": task queues such as Celery and Dramatiq run and retry work, but nothing in them notices work that is stuck or lost, which is the recovery this system is built around. A Celery prototype passed 14 of the 15 end-to-end tests; the one it failed was a stage that is down. The comparison with Redis as the broker is under "Broker: RabbitMQ or Redis".
 
 What is deliberately out of this version: more than one orchestrator instance, authentication, structured logs and metrics, a manual retry for terminal orders, and Redis and SQLite adapters. The full list is under "Limits" in the design record.
 
