@@ -17,7 +17,7 @@ flowchart TB
   s1 & s2 & s3 -->|next stage, retries| mq
   s1 & s2 & s3 -->|attempt events| mq
   mq -->|orchestrator.records| recorder[Recorder]
-  recorder -->|the only writes of order state and history| pg
+  recorder -->|every change to order state and history| pg
   recorder -->|undo pipeline| mq
 ```
 
@@ -25,7 +25,7 @@ Three kinds of process share one RabbitMQ and one Postgres:
 
 - **The orchestrator** serves the API and the timeline page. Submitting an order inserts the order row and enqueues a Dramatiq pipeline: one message per stage, each on its stage's queue. The orchestrator also runs the wait watcher, a loop that gives up orders whose work no worker took in time.
 - **Stage workers**, one container per stage from one image, run the `flowforge.stage` actor for their queue. They hold no state and have no database access: a message carries everything a stage needs, and the worker reports what happened as events.
-- **The recorder**, run from the orchestrator image, consumes `orchestrator.records` and is the only writer of order state and attempt history. When an order must be compensated, it enqueues the undo pipeline.
+- **The recorder**, run from the orchestrator image, consumes `orchestrator.records` and makes every change to order state and attempt history; the API only inserts a new order. When an order must be compensated, it enqueues the undo pipeline.
 
 Dramatiq runs the work: it chains the stages, retries a stage with the delay the worker asks for, acknowledges a message only after processing it, and redelivers it if a worker dies. The application owns the policy: what counts as an attempt, the backoff, the deadline, compensation, and how long work may wait for a worker.
 
@@ -73,12 +73,12 @@ Stages can be slow, fail, or be down. The policy treats those differently:
 | An undo handler on every stage, default a no-op; a permanent failure undoes every stage that ran, in reverse, the failing stage included | No compensation; declaring undo-capable stages in orchestrator config, which would make the orchestrator know about stages |
 | Dramatiq runs the stages; the application owns the recovery policy | The orchestrator's own dispatcher, sweep, and message bus (more code for the same guarantees); Celery (see "Building on a task library" below); a workflow engine such as Temporal (a second platform to run) |
 | A stage that is down is a bounded, visible wait | Timing out attempts while no worker runs them, which spends the retry budget on an outage and needs the orchestrator to track every send |
-| One recorder, the only writer of order state | Stage workers writing to Postgres, which gives every stage database access and copies the schema into the stage code |
+| One recorder makes every change to an order after it is created | Stage workers writing to Postgres, which gives every stage database access and copies the schema into the stage code |
 | RabbitMQ | Redis: losing a command or a result is unacceptable here, and RabbitMQ confirms a message only once it is on disk; Redis wins when latency comes first (see "Broker: RabbitMQ or Redis" below) |
 | Publisher confirms on every enqueue | Dramatiq's default of unconfirmed publishes, which can lose a message silently |
 | Order row plus an append-only attempt log | Event sourcing with a projection: the history the UI needs is the attempt log, and the event log adds fold and projection code for the same visible behaviour |
 | One container per stage, built from one image, handler chosen by `STAGE_NAME` | One API container plus a worker pool (the separate services are the point); one image per stage (three Dockerfiles for identical code) |
-| Postgres | SQLite. It would work for this version, since the recorder is the only writer and WAL mode lets readers run alongside it. Postgres was chosen because the recorder's guards and the status read rely on row locks (`FOR UPDATE`) and `REPEATABLE READ` snapshots, every write would serialize on one database file, and a database file on a Docker volume ties the data to one host |
+| Postgres | SQLite. It would work for this version, since writes are an insert per order plus one recorder, and WAL mode lets readers run alongside it. Postgres was chosen because the recorder's guards and the status read rely on row locks (`FOR UPDATE`) and `REPEATABLE READ` snapshots, every write would serialize on one database file, and a database file on a Docker volume ties the data to one host |
 | Required `Idempotency-Key` header; unique index; SHA-256 of canonical JSON for the comparison; 201 created, 200 replay, 409 mismatch | Server-generated ids with duplicates allowed; payload hashing as the key, which collides on legitimate identical orders |
 | Observability is the attempt history, the waiting state, and the timeline page | Structured logs with correlation ids and a metrics endpoint: out of scope for this version |
 | Pydantic models and the message contract in one `contracts` package, shared by the orchestrator and the stages | Schema copies in each image, where drift becomes a dropped message |
