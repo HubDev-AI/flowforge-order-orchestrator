@@ -290,6 +290,7 @@ dependencies = [
     { name = "asyncpg" },
     { name = "fastapi" },
     { name = "flowforge-contracts" },
+    { name = "psycopg", extra = ["binary"] },
     { name = "pydantic-settings" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "uvicorn" },
@@ -301,6 +302,7 @@ requires-dist = [
     { name = "asyncpg", specifier = "==0.32.0" },
     { name = "fastapi", specifier = "==0.143.0" },
     { name = "flowforge-contracts", editable = "packages/contracts" },
+    { name = "psycopg", extras = ["binary"], specifier = "==3.3.6" },
     { name = "pydantic-settings", specifier = "==2.15.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = "==2.1.4" },
     { name = "uvicorn", specifier = "==0.54.0" },
@@ -345,14 +347,10 @@ version = "0.1.0"
 source = { virtual = "services/stage" }
 dependencies = [
     { name = "flowforge-stage-kit" },
-    { name = "psycopg", extra = ["binary"] },
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "flowforge-stage-kit", editable = "packages/stage_kit" },
-    { name = "psycopg", extras = ["binary"], specifier = "==3.3.6" },
-]
+requires-dist = [{ name = "flowforge-stage-kit", editable = "packages/stage_kit" }]
 
 [[package]]
 name = "flowforge-stage-kit"

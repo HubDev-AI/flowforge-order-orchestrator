@@ -7,7 +7,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import dramatiq
-import recorder
 from contracts import (
     STAGE_ACTOR,
     Command,
@@ -15,7 +14,7 @@ from contracts import (
     Outcome,
     OutcomeScript,
     ScriptToken,
-    stage_message,
+    record_message,
     stage_queue,
     utc_now,
 )
@@ -88,15 +87,8 @@ def backoff_seconds(policy: dict[str, float], attempt: int) -> float:
     return min(policy["backoff_cap_seconds"], policy["backoff_base_seconds"] * 2 ** (attempt - 1))
 
 
-def compensate(order_id: str, position: int, plan: list[dict[str, Any]], submission: dict) -> None:
-    """Undo every dispatched stage in reverse, the failing one first."""
-    undo = [
-        stage_message(
-            order_id=order_id, position=p, kind=CommandKind.UNDO, plan=plan, submission=submission
-        )
-        for p in range(position, -1, -1)
-    ]
-    dramatiq.pipeline(undo, broker=broker).run()
+def emit(event: dict[str, Any]) -> None:
+    broker.enqueue(record_message(event))
 
 
 @dramatiq.actor(
@@ -112,14 +104,19 @@ def run_stage(
     kind: str,
     plan: list[dict[str, Any]],
     submission: dict[str, Any],
+    prior_output: dict[str, Any] | None = None,
 ) -> None:
     step = plan[position]
     stage, policy = step["name"], step["policy"]
-    attempt = CurrentMessage.get_current_message().options.get("retries", 0) + 1
+    message = CurrentMessage.get_current_message()
+    attempt = (message.options.get("retries", 0) if message else 0) + 1
     started = datetime.now(UTC)
     deadline_at = started + timedelta(seconds=policy["deadline_seconds"])
-    recorder.start(order_id, stage, kind, attempt, started, deadline_at)
-    prior = recorder.execute_output(order_id, stage) if kind == CommandKind.UNDO else None
+    identity = {"order_id": order_id, "stage": stage, "kind": kind, "attempt": attempt}
+    emit(
+        identity
+        | {"type": "started", "at": started.isoformat(), "deadline_at": deadline_at.isoformat()}
+    )
     command = Command(
         order_id=order_id,
         stage=stage,
@@ -128,22 +125,31 @@ def run_stage(
         deadline_at=deadline_at,
         payload=submission["payload"],
         script=OutcomeScript.model_validate(submission.get("script") or {}),
-        prior_stage_output=prior,
+        prior_stage_output=prior_output if kind == CommandKind.UNDO else None,
     )
     outcome, reason, output = decide(command, load_handler(stage), simulator())
     logger.info("order %s %s %s attempt %s: %s", order_id, stage, kind, attempt, outcome)
     now = datetime.now(UTC)
+    finished = identity | {"at": now.isoformat(), "plan": plan, "position": position}
     if outcome is Outcome.SUCCEEDED:
-        recorder.succeed(order_id, plan, position, kind, attempt, output, now)
+        emit(finished | {"type": "succeeded", "output": output})
         return
     if outcome is not Outcome.REJECTED and attempt < policy["max_attempts"]:
         delay = backoff_seconds(policy, attempt)
-        recorder.retry(
-            order_id, stage, kind, attempt, outcome, reason, now, now + timedelta(seconds=delay)
+        due_at = now + timedelta(seconds=delay)
+        emit(
+            finished
+            | {
+                "type": "retry",
+                "outcome": outcome.value,
+                "reason": reason,
+                "due_at": due_at.isoformat(),
+            }
         )
         raise dramatiq.Retry(delay=int(delay * 1000))
     final = Outcome.REJECTED if outcome is Outcome.REJECTED else Outcome.EXHAUSTED
-    recorder.fail(order_id, stage, kind, attempt, final, reason, now)
-    if kind == CommandKind.EXECUTE:
-        compensate(order_id, position, plan, submission)
+    emit(
+        finished
+        | {"type": "failed", "outcome": final.value, "reason": reason, "submission": submission}
+    )
     raise PermanentFailure(f"{stage} {final.value}: {reason}")

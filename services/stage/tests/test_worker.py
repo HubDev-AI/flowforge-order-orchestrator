@@ -15,6 +15,7 @@ POLICY = {
     "deadline_seconds": 10.0,
 }
 PLAN = [{"name": name, "policy": POLICY} for name in ("inventory", "fraud", "shipping")]
+ORDER_ID = str(uuid4())
 
 
 class Recording(StageHandler):
@@ -75,26 +76,61 @@ def test_the_backoff_doubles_per_attempt_up_to_the_cap():
 
 
 @pytest.fixture
-def launched(monkeypatch):
-    pipelines = []
-
-    class Captured:
-        def __init__(self, messages, broker=None):
-            self.messages = messages
-
-        def run(self):
-            pipelines.append(self.messages)
-
-    monkeypatch.setattr(worker.dramatiq, "pipeline", Captured)
-    return pipelines
+def events(monkeypatch):
+    sent = []
+    monkeypatch.setattr(worker, "emit", sent.append)
+    monkeypatch.setattr(worker, "simulator", sim)
+    return sent
 
 
-def test_compensation_undoes_every_dispatched_stage_in_reverse(launched):
-    worker.compensate("o-1", 1, PLAN, {"payload": {}})
+def run(script=None, kind=CommandKind.EXECUTE, position=1, prior_output=None):
+    worker.run_stage.fn(
+        order_id=ORDER_ID,
+        position=position,
+        kind=kind,
+        plan=PLAN,
+        submission={"payload": {}, "script": script or {}},
+        prior_output=prior_output,
+    )
 
-    [messages] = launched
-    assert [(m.kwargs["position"], m.kwargs["kind"]) for m in messages] == [
-        (1, "undo"),
-        (0, "undo"),
-    ]
-    assert [m.queue_name for m in messages] == ["stage.fraud", "stage.inventory"]
+
+def test_a_successful_attempt_reports_its_start_and_its_output(events):
+    run()
+
+    assert [e["type"] for e in events] == ["started", "succeeded"]
+    assert (events[1]["stage"], events[1]["attempt"]) == ("fraud", 1)
+    assert "score" in events[1]["output"]
+
+
+def test_a_transient_failure_reports_the_retry_and_asks_dramatiq_to_retry(events):
+    with pytest.raises(worker.dramatiq.Retry) as retry:
+        run({"fraud": {"execute": ["retry"]}})
+
+    assert events[-1]["type"] == "retry"
+    assert events[-1]["outcome"] == "retry"
+    assert retry.value.delay == 1000
+
+
+def test_a_rejection_reports_the_failure_and_stops_the_pipeline(events):
+    with pytest.raises(worker.PermanentFailure):
+        run({"fraud": {"execute": ["reject"]}})
+
+    assert (events[-1]["type"], events[-1]["outcome"]) == ("failed", "rejected")
+    assert events[-1]["submission"]["script"] == {"fraud": {"execute": ["reject"]}}
+
+
+def test_an_undo_hands_the_execute_output_to_the_handler(events, monkeypatch):
+    seen = []
+
+    class Undo(StageHandler):
+        async def execute(self, command):
+            return None
+
+        async def undo(self, command):
+            seen.append(command.prior_stage_output)
+
+    monkeypatch.setattr(worker, "load_handler", lambda name: Undo())
+
+    run(kind=CommandKind.UNDO, position=0, prior_output={"reservation_id": "r-1"})
+
+    assert seen == [{"reservation_id": "r-1"}]

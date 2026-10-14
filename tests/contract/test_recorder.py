@@ -1,8 +1,8 @@
 from datetime import timedelta
 
 import pytest
-import recorder
 from contracts import Outcome
+from orchestrator import recorder
 from orchestrator.adapters.postgres_store import PostgresStore
 from orchestrator.domain.models import OrderState
 
@@ -15,10 +15,18 @@ POLICY = {
     "deadline_seconds": 10.0,
 }
 PLAN = [{"name": name, "policy": POLICY} for name in ("inventory", "fraud")]
+SUBMISSION = {"payload": {"sku": "A-1"}}
 
 
 @pytest.fixture
-async def recorded(recorder_database, make_order, now):
+def compensations(monkeypatch):
+    started = []
+    monkeypatch.setattr(recorder, "compensate", lambda *args: started.append(args))
+    return started
+
+
+@pytest.fixture
+async def recorded(recorder_database, make_order, now, compensations):
     engine = await recorder_database()
     store = PostgresStore(engine)
     order = make_order(stages=("inventory", "fraud"))
@@ -84,13 +92,32 @@ async def test_a_redelivered_attempt_restarts_its_row_instead_of_failing(recorde
     ]
 
 
-async def test_an_undo_reads_the_output_of_the_execute_it_reverses(recorded):
+async def test_a_failed_execute_starts_compensation_with_each_stage_output(recorded, compensations):
     order_id, _, now = recorded
     start(order_id, "inventory", "execute", 1, now)
     recorder.succeed(order_id, PLAN, 0, "execute", 1, {"reservation_id": "r-1"}, now)
+    start(order_id, "fraud", "execute", 1, now)
+    recorder.fail(order_id, PLAN, 1, "execute", 1, Outcome.REJECTED, "no", now, SUBMISSION)
 
-    assert recorder.execute_output(order_id, "inventory") == {"reservation_id": "r-1"}
-    assert recorder.execute_output(order_id, "fraud") is None
+    [(compensated_order, plan, position, submission, outputs)] = compensations
+    assert (compensated_order, position, submission) == (order_id, 1, SUBMISSION)
+    assert outputs == {0: {"reservation_id": "r-1"}, 1: None}
+
+
+async def test_a_finish_recorded_before_its_start_is_not_reopened_by_the_late_start(recorded):
+    order_id, read, now = recorded
+    start(order_id, "inventory", "execute", 1, now)
+    recorder.succeed(order_id, PLAN, 0, "execute", 1, None, now)
+    recorder.succeed(order_id, PLAN, 1, "execute", 1, {"score": 1}, now)
+    start(order_id, "fraud", "execute", 1, now)
+
+    order, attempts = await read()
+
+    assert order.state is OrderState.COMPLETED
+    assert [(a.stage, a.outcome) for a in attempts] == [
+        ("inventory", Outcome.SUCCEEDED),
+        ("fraud", Outcome.SUCCEEDED),
+    ]
 
 
 async def test_a_rejection_compensates_and_the_last_undo_fails_the_order(recorded):
@@ -98,7 +125,7 @@ async def test_a_rejection_compensates_and_the_last_undo_fails_the_order(recorde
     start(order_id, "inventory", "execute", 1, now)
     recorder.succeed(order_id, PLAN, 0, "execute", 1, None, now)
     start(order_id, "fraud", "execute", 1, now)
-    recorder.fail(order_id, "fraud", "execute", 1, Outcome.REJECTED, "no", now)
+    recorder.fail(order_id, PLAN, 1, "execute", 1, Outcome.REJECTED, "no", now, SUBMISSION)
     compensating, _ = await read()
     start(order_id, "fraud", "undo", 1, now)
     recorder.succeed(order_id, PLAN, 1, "undo", 1, None, now)
@@ -115,9 +142,9 @@ async def test_a_rejection_compensates_and_the_last_undo_fails_the_order(recorde
 async def test_an_undo_that_gives_up_ends_in_compensation_failed_with_both_reasons(recorded):
     order_id, read, now = recorded
     start(order_id, "fraud", "execute", 1, now)
-    recorder.fail(order_id, "fraud", "execute", 1, Outcome.REJECTED, "no", now)
+    recorder.fail(order_id, PLAN, 1, "execute", 1, Outcome.REJECTED, "no", now, SUBMISSION)
     start(order_id, "fraud", "undo", 3, now)
-    recorder.fail(order_id, "fraud", "undo", 3, Outcome.EXHAUSTED, "stuck", now)
+    recorder.fail(order_id, PLAN, 1, "undo", 3, Outcome.EXHAUSTED, "stuck", now, SUBMISSION)
 
     order, _ = await read()
 

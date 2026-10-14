@@ -2,9 +2,18 @@ from contracts.clock import utc_now
 from contracts.messages import AttemptKey, Command
 from contracts.outcomes import CommandKind, Outcome
 from contracts.script import OutcomeScript, ScriptToken
-from contracts.tasks import STAGE_ACTOR, stage_message, stage_queue
+from contracts.tasks import (
+    RECORD_ACTOR,
+    RECORDS_QUEUE,
+    STAGE_ACTOR,
+    record_message,
+    stage_message,
+    stage_queue,
+)
 
 __all__ = [
+    "RECORDS_QUEUE",
+    "RECORD_ACTOR",
     "STAGE_ACTOR",
     "AttemptKey",
     "Command",
@@ -12,6 +21,7 @@ __all__ = [
     "Outcome",
     "OutcomeScript",
     "ScriptToken",
+    "record_message",
     "stage_message",
     "stage_queue",
     "utc_now",
