@@ -38,6 +38,7 @@ Unchanged: the API and its responses, idempotency, the body and script limits, t
 | Retry delay | `self.retry(countdown=…)` | `raise Retry(delay=…)`; the default backoff (15 s minimum, with jitter) is bypassed by the explicit delay |
 | Compensation trigger | The chain's `link_error` errback, run inside the failing worker | The actor enqueues the undo pipeline itself. Dramatiq's `on_failure` callback fires after every failed run, including runs that will be retried, so it cannot mean "gave up" |
 | Deadline including queue time | Not available | `AgeLimit` exists but measures from the message's first enqueue and a retry keeps that timestamp, so a retry after a timed-out attempt would be dropped; it is not used |
+| Publisher confirms | Off by default; turned on with `confirm_publish` | Off by default; turned on with `confirm_delivery=True` |
 | Failed messages | Acknowledged and gone | Dead-lettered to `stage.<name>.XQ` and kept for seven days, so a stuck order's message can be inspected |
 | Tooling | `celery inspect` and Flower, unavailable here | Prometheus middleware available; no remote inspection |
 
@@ -52,4 +53,4 @@ The same as on the Celery branch:
 
 ## Verdict
 
-Dramatiq is the better of the two libraries for this system: it worked with RabbitMQ 4.3 without changes, acknowledges after processing, retries unexpected errors, and keeps failed messages in a dead-letter queue. It took slightly less code than Celery. It does not change the result that matters: both libraries pass the same 14 end-to-end tests and fail the same one, because neither notices work that is waiting or lost. That recovery is the part of `main` a task queue does not replace.
+Dramatiq is the better of the two libraries for this system: it worked with RabbitMQ 4.3 without changes (publisher confirms aside, which both libraries leave off by default), acknowledges after processing, retries unexpected errors, and keeps failed messages in a dead-letter queue. It took slightly less code than Celery. It does not change the result that matters: both libraries pass the same 14 end-to-end tests and fail the same one, because neither notices work that is waiting or lost. That recovery is the part of `main` a task queue does not replace.

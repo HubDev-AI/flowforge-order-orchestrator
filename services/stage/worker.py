@@ -31,7 +31,7 @@ SIMULATED_REJECTION = "simulated rejection"
 DEADLINE_PASSED = "deadline passed"
 
 _url = os.environ.get("RABBITMQ_URL")
-broker = RabbitmqBroker(url=_url) if _url else StubBroker()
+broker = RabbitmqBroker(url=_url, confirm_delivery=True) if _url else StubBroker()
 broker.add_middleware(CurrentMessage())
 dramatiq.set_broker(broker)
 

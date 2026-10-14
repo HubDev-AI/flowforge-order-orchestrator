@@ -47,7 +47,7 @@ def order_pipeline(broker: RabbitmqBroker, order: Order, config: PipelineConfig)
 
 
 def dramatiq_launcher(broker_url: str, config: PipelineConfig) -> Launcher:
-    broker = RabbitmqBroker(url=broker_url)
+    broker = RabbitmqBroker(url=broker_url, confirm_delivery=True)
 
     async def launch(order: Order) -> None:
         await asyncio.to_thread(order_pipeline(broker, order, config).run)
