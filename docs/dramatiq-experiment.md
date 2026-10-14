@@ -10,23 +10,25 @@ This branch replaces the orchestrator's own execution layer with Dramatiq, the s
 | Running a stage | A stage service consumes its queue through the bus package and publishes a result | A Dramatiq worker per stage runs the `flowforge.stage` actor with the same simulator and handlers |
 | Retries and backoff | The pure `transition` function sets a due time; the dispatcher re-publishes when it is due | The actor raises `dramatiq.Retry(delay=…)`; the message waits in Dramatiq's delay queue. The attempt number is the message's retry count |
 | Deadlines | Set when the attempt is dispatched; queue time counts; a sweep times out silent attempts | Checked by the worker against the time the attempt started; a message time limit five seconds later is only a backstop |
-| Compensation | The transition function moves the order to `compensating`; the dispatcher sends undo commands | The failing actor enqueues a pipeline of undo messages in reverse, then raises an exception listed in `throws`, which stops the pipeline without a retry |
-| History and state | The orchestrator writes every attempt and order change | Each stage worker writes its attempt and the order's state to Postgres, as on the Celery branch |
+| Compensation | The transition function moves the order to `compensating`; the dispatcher sends undo commands | The failing actor reports the failure and raises an exception listed in `throws`, which stops the pipeline without a retry; the recorder then enqueues a pipeline of undo messages in reverse, each carrying the output of the execute it reverses |
+| History and state | The orchestrator writes every attempt and order change | Stage workers send an event when an attempt starts and ends to the `orchestrator.records` queue; a `recorder` service, run from the orchestrator image, is the only writer of order state and history. Stage workers have no database access |
 | Retry policy | Read from the current config when an attempt fails | Copied into each message at submission (`max_retries`, deadline), so a config change affects only new orders |
 
-Unchanged: the API and its responses, idempotency, the body and script limits, the timeline page, the outcome script, the simulator, the stage handlers, the schema, and the Compose commands. The worker's SQL recorder and the trimmed store and tests are the same as on the Celery branch, so the two branches differ only in the library integration.
+Unchanged: the API and its responses, idempotency, the body and script limits, the timeline page, the outcome script, the simulator, the stage handlers, the schema, and the Compose commands. The trimmed store and API tests are the same as on the Celery branch. Unlike the Celery branch, where each stage worker writes to Postgres, this branch keeps a single writer.
 
 ## Size
 
 | | `main` | Celery | Dramatiq |
 |---|---:|---:|---:|
-| Production Python lines | 1,915 | 1,249 | 1,230 |
-| Library integration (worker, recorder, launcher, message contract) | n/a | 421 | 403 |
-| Test lines | 3,714 | 1,895 | 1,867 |
+| Production Python lines | 1,915 | 1,249 | 1,349 |
+| Library integration (worker, recorder, launcher, message contract) | n/a | 421 | 512 |
+| Test lines | 3,714 | 1,895 | 1,966 |
+
+The Dramatiq branch is larger than the Celery one because it keeps a single database writer: the recorder actor, its event handling, and the guards for late events.
 
 ## The original end-to-end suite against this branch
 
-`tests/e2e/` is unchanged from `main`. 14 of 15 tests pass, the same 14 as on the Celery branch. The failure is the same: `test_only_the_live_attempt_runs_when_a_stage_comes_back_after_timeouts`. While a stage's worker is down its message waits in the queue, nothing records an attempt or a timeout, and the order stays `running` until the worker returns. The unit suite (95 tests) and the adapter contract suite (16 tests) pass.
+`tests/e2e/` is unchanged from `main`. 14 of 15 tests pass, the same 14 as on the Celery branch. The failure is the same: `test_only_the_live_attempt_runs_when_a_stage_comes_back_after_timeouts`. While a stage's worker is down its message waits in the queue, nothing records an attempt or a timeout, and the order stays `running` until the worker returns. The unit suite (99 tests) and the adapter contract suite (17 tests) pass.
 
 ## Dramatiq against Celery, as built
 
@@ -47,8 +49,9 @@ Unchanged: the API and its responses, idempotency, the body and script limits, t
 The same as on the Celery branch:
 
 - **Deadlines do not include time in the queue,** so a stage that is down is invisible until it returns.
-- **No recovery of lost work.** A crash between storing an order and enqueueing its pipeline leaves it `pending`; a crash between recording a permanent failure and enqueueing the undo pipeline leaves it `compensating`. On `main` the sweep recovers both.
-- **Stage workers write order state** to Postgres, and the recorder's SQL duplicates the schema.
+- **No recovery of lost work.** A crash between storing an order and enqueueing its pipeline leaves it `pending`. On `main` the sweep recovers it.
+- **State updates are asynchronous.** The order's state lags each attempt by one hop through the records queue. One recorder consumes that queue in order, but a recorder retry after a database error delivers its event late; the writes are guarded so a late start cannot reopen a finished attempt or move the order back, and a finish that arrives first creates the attempt row.
+- **Compensation depends on the recorder.** If the recorder records a permanent failure and crashes before enqueueing the undo pipeline, the order stays `compensating`.
 - **Retry state lives in the broker,** as a message in the delay queue.
 
 ## Verdict
