@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -10,7 +11,7 @@ from orchestrator.adapters.memory_store import MemoryStore
 from orchestrator.adapters.postgres_store import PostgresStore
 from orchestrator.app.clock import Clock, utc_now
 from orchestrator.app.config import PipelineConfig, Settings, load_pipeline_config
-from orchestrator.app.workflow import Launcher, dramatiq_launcher
+from orchestrator.app.workflow import Launcher, dramatiq_workflow, watch_waiting
 from orchestrator.domain.models import Order
 from orchestrator.ports.store import OrderStore
 
@@ -44,11 +45,17 @@ async def _open_runtime(
         store: OrderStore = PostgresStore(engine)
     else:
         store = MemoryStore()
-    if config.adapters.bus == "rabbitmq":
-        launch = dramatiq_launcher(_required(settings.rabbitmq_url, "RABBITMQ_URL"), config)
-    else:
-        launch = _launch_nothing
+    if config.adapters.bus != "rabbitmq":
+        return Runtime(config, store, _launch_nothing, utc_now)
+    launch, report = dramatiq_workflow(_required(settings.rabbitmq_url, "RABBITMQ_URL"), config)
+    watcher = asyncio.create_task(watch_waiting(store, report, config, utc_now))
+    stack.push_async_callback(_cancel, watcher)
     return Runtime(config, store, launch, utc_now)
+
+
+async def _cancel(task: asyncio.Task) -> None:
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
 
 
 @asynccontextmanager

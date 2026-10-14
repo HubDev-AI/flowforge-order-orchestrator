@@ -131,6 +131,15 @@ class Orders:
         return self.wait_until(order_id, lambda s: s["state"] in TERMINAL_STATES, timeout)
 
     @staticmethod
+    def wait_until_logged(stack: Stack, service: str, text: str, timeout: float = 30) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if text in stack.logs(service):
+                return
+            time.sleep(0.5)
+        raise TimeoutError(f"{service} never logged {text!r}")
+
+    @staticmethod
     def history(status: dict) -> list[tuple]:
         return [(a["stage"], a["kind"], a["attempt"], a["outcome"]) for a in status["attempts"]]
 

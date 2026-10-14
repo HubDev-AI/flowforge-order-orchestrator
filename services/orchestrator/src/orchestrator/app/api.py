@@ -62,6 +62,7 @@ async def submit_order(
         terminal_reason=None,
         created_at=now,
         updated_at=now,
+        waiting_since=now,
     )
     try:
         await runtime.store.create_order(order)
@@ -92,7 +93,7 @@ async def get_order_status(order_id: str, runtime: RuntimeDep) -> OrderStatus:
     found = await runtime.store.get_order_with_attempts(parsed)
     if found is None:
         raise HTTPException(status_code=404, detail="order not found")
-    return to_status(*found)
+    return to_status(*found, runtime.clock())
 
 
 @pages.get("/", include_in_schema=False)

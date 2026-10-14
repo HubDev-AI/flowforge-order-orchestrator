@@ -16,6 +16,8 @@ class OrderState(StrEnum):
     COMPENSATION_FAILED = "compensation_failed"
 
 
+ACTIVE_STATES = frozenset({OrderState.PENDING, OrderState.RUNNING, OrderState.COMPENSATING})
+
 TERMINAL_STATES = frozenset(
     {OrderState.COMPLETED, OrderState.FAILED, OrderState.COMPENSATION_FAILED}
 )
@@ -27,6 +29,7 @@ class StagePolicy:
     backoff_base: timedelta
     backoff_cap: timedelta
     dispatch_deadline: timedelta
+    max_wait: timedelta
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +46,7 @@ class Order:
     terminal_reason: str | None
     created_at: datetime
     updated_at: datetime
+    waiting_since: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

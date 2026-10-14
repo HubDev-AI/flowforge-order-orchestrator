@@ -1,6 +1,9 @@
-from contracts import STAGE_ACTOR
+from datetime import timedelta
+
+from contracts import STAGE_ACTOR, CommandKind
 from dramatiq.brokers.stub import StubBroker
-from orchestrator.app.workflow import order_pipeline, plan_for
+from orchestrator.app.workflow import GIVE_UP_MARGIN, gave_up_event, order_pipeline, plan_for
+from orchestrator.domain.models import OrderState
 
 from .conftest import pipeline_config
 
@@ -44,4 +47,43 @@ def test_the_plan_snapshots_the_order_stages_with_their_policies(make_order):
         "backoff_base_seconds": 1.0,
         "backoff_cap_seconds": 30.0,
         "deadline_seconds": 10.0,
+        "max_wait_seconds": 60.0,
     }
+
+
+def test_an_order_is_given_up_only_after_its_stage_max_wait_and_the_margin(make_order, now):
+    config = pipeline_config()
+    order = make_order(
+        state=OrderState.RUNNING,
+        current_stage="fraud",
+        current_kind=CommandKind.EXECUTE,
+        waiting_since=now,
+    )
+    limit = timedelta(seconds=60) + GIVE_UP_MARGIN
+
+    assert gave_up_event(order, config, now + limit) is None
+    event = gave_up_event(order, config, now + limit + timedelta(seconds=1))
+
+    assert (event["type"], event["position"], event["kind"]) == ("gave_up", 1, "execute")
+    assert event["waiting_since"] == now.isoformat()
+
+
+def test_a_pending_order_is_given_up_at_its_first_stage(make_order, now):
+    order = make_order(waiting_since=now)
+
+    event = gave_up_event(order, pipeline_config(), now + timedelta(minutes=5))
+
+    assert (event["position"], event["kind"]) == (0, "execute")
+
+
+def test_a_compensating_order_is_given_up_on_its_undo(make_order, now):
+    order = make_order(
+        state=OrderState.COMPENSATING,
+        current_stage="inventory",
+        current_kind=CommandKind.UNDO,
+        waiting_since=now,
+    )
+
+    event = gave_up_event(order, pipeline_config(), now + timedelta(minutes=5))
+
+    assert (event["position"], event["kind"]) == (0, "undo")
