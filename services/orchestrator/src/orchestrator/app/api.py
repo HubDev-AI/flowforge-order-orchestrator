@@ -1,4 +1,3 @@
-from datetime import timedelta
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID, uuid4
@@ -15,8 +14,7 @@ from orchestrator.app.schemas import (
     to_status,
 )
 from orchestrator.domain.errors import DuplicateIdempotencyKey
-from orchestrator.domain.models import Order
-from orchestrator.domain.transitions import Submitted, transition
+from orchestrator.domain.models import Order, OrderState
 
 MAX_IDEMPOTENCY_KEY_LENGTH = 255
 TIMELINE_PAGE = Path(__file__).resolve().parents[1] / "static" / "index.html"
@@ -51,19 +49,17 @@ async def submit_order(
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     now = runtime.clock()
-    due_at = now + timedelta(seconds=runtime.config.sweep.pending_threshold_seconds)
-    decision = transition(None, Submitted(at=due_at))
     order = Order(
         id=uuid4(),
         idempotency_key=idempotency_key,
         payload=submission,
         payload_hash=digest,
         stages=stages,
-        state=decision.state,
-        current_stage=decision.current_stage,
-        current_kind=decision.current_kind,
-        next_due_at=decision.next_due_at,
-        terminal_reason=decision.terminal_reason,
+        state=OrderState.PENDING,
+        current_stage=None,
+        current_kind=None,
+        next_due_at=None,
+        terminal_reason=None,
         created_at=now,
         updated_at=now,
     )
@@ -74,7 +70,7 @@ async def submit_order(
         if raced is None:
             raise
         return _replay(raced, digest, response)
-    runtime.nudge.set()
+    await runtime.launch(order)
     return SubmissionResponse(id=order.id, state=order.state)
 
 

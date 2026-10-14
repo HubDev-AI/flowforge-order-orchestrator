@@ -1,10 +1,10 @@
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
-from contracts import AttemptKey, CommandKind, Outcome
+from contracts import CommandKind, Outcome
 
 
 class OrderState(StrEnum):
@@ -30,37 +30,6 @@ class StagePolicy:
 
 
 @dataclass(frozen=True, slots=True)
-class AttemptClose:
-    outcome: Outcome
-    reason: str | None
-    stage_output: dict[str, Any] | None
-    finished_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
-class Decision:
-    state: OrderState
-    current_stage: str | None
-    current_kind: CommandKind | None
-    next_due_at: datetime | None
-    terminal_reason: str | None
-    close: AttemptClose | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class NewAttempt:
-    stage: str
-    kind: CommandKind
-    deadline_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
-class Dispatch:
-    decision: Decision
-    attempt: NewAttempt
-
-
-@dataclass(frozen=True, slots=True)
 class Order:
     id: UUID
     idempotency_key: str
@@ -74,17 +43,6 @@ class Order:
     terminal_reason: str | None
     created_at: datetime
     updated_at: datetime
-
-    def apply(self, decision: Decision, at: datetime) -> Order:
-        return replace(
-            self,
-            state=decision.state,
-            current_stage=decision.current_stage,
-            current_kind=decision.current_kind,
-            next_due_at=decision.next_due_at,
-            terminal_reason=decision.terminal_reason,
-            updated_at=at,
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,26 +61,3 @@ class Attempt:
     @property
     def is_open(self) -> bool:
         return self.finished_at is None
-
-    @property
-    def key(self) -> AttemptKey:
-        return AttemptKey(
-            order_id=self.order_id, stage=self.stage, attempt=self.attempt, kind=self.kind
-        )
-
-    def matches(self, key: AttemptKey) -> bool:
-        return (self.order_id, self.stage, self.kind, self.attempt) == (
-            key.order_id,
-            key.stage,
-            key.kind,
-            key.attempt,
-        )
-
-    def closed_by(self, close: AttemptClose) -> Attempt:
-        return replace(
-            self,
-            outcome=close.outcome,
-            reason=close.reason,
-            stage_output=close.stage_output,
-            finished_at=close.finished_at,
-        )

@@ -1,0 +1,125 @@
+from datetime import timedelta
+
+import pytest
+import recorder
+from contracts import Outcome
+from orchestrator.adapters.postgres_store import PostgresStore
+from orchestrator.domain.models import OrderState
+
+pytestmark = pytest.mark.contract
+
+POLICY = {
+    "max_attempts": 3,
+    "backoff_base_seconds": 1.0,
+    "backoff_cap_seconds": 30.0,
+    "deadline_seconds": 10.0,
+}
+PLAN = [{"name": name, "policy": POLICY} for name in ("inventory", "fraud")]
+
+
+@pytest.fixture
+async def recorded(recorder_database, make_order, now):
+    engine = await recorder_database()
+    store = PostgresStore(engine)
+    order = make_order(stages=("inventory", "fraud"))
+    await store.create_order(order)
+
+    async def read():
+        return await store.get_order_with_attempts(order.id)
+
+    yield str(order.id), read, now
+    await engine.dispose()
+
+
+def start(order_id, stage, kind, attempt, now):
+    recorder.start(order_id, stage, kind, attempt, now, now + timedelta(seconds=10))
+
+
+async def test_an_execute_run_records_every_attempt_and_completes_the_order(recorded):
+    order_id, read, now = recorded
+    start(order_id, "inventory", "execute", 1, now)
+    recorder.succeed(order_id, PLAN, 0, "execute", 1, {"reservation_id": "r-1"}, now)
+    start(order_id, "fraud", "execute", 1, now)
+    recorder.retry(order_id, "fraud", "execute", 1, Outcome.RETRY, "flaky", now, now)
+    start(order_id, "fraud", "execute", 2, now)
+    recorder.succeed(order_id, PLAN, 1, "execute", 2, None, now)
+
+    order, attempts = await read()
+
+    assert (order.state, order.current_stage, order.next_due_at) == (
+        OrderState.COMPLETED,
+        None,
+        None,
+    )
+    assert [(a.stage, a.attempt, a.outcome, a.stage_output) for a in attempts] == [
+        ("inventory", 1, Outcome.SUCCEEDED, {"reservation_id": "r-1"}),
+        ("fraud", 1, Outcome.RETRY, None),
+        ("fraud", 2, Outcome.SUCCEEDED, None),
+    ]
+
+
+async def test_a_retry_shows_when_the_next_attempt_is_due(recorded):
+    order_id, read, now = recorded
+    due = now + timedelta(seconds=2)
+    start(order_id, "inventory", "execute", 1, now)
+    recorder.retry(
+        order_id, "inventory", "execute", 1, Outcome.TIMED_OUT, "deadline passed", now, due
+    )
+
+    order, [attempt] = await read()
+
+    assert (order.state, order.next_due_at) == (OrderState.RUNNING, due)
+    assert (attempt.outcome, attempt.reason) == (Outcome.TIMED_OUT, "deadline passed")
+
+
+async def test_a_redelivered_attempt_restarts_its_row_instead_of_failing(recorded):
+    order_id, read, now = recorded
+    start(order_id, "inventory", "execute", 1, now)
+    start(order_id, "inventory", "execute", 1, now + timedelta(seconds=1))
+
+    _, attempts = await read()
+
+    assert [(a.attempt, a.started_at, a.is_open) for a in attempts] == [
+        (1, now + timedelta(seconds=1), True)
+    ]
+
+
+async def test_an_undo_reads_the_output_of_the_execute_it_reverses(recorded):
+    order_id, _, now = recorded
+    start(order_id, "inventory", "execute", 1, now)
+    recorder.succeed(order_id, PLAN, 0, "execute", 1, {"reservation_id": "r-1"}, now)
+
+    assert recorder.execute_output(order_id, "inventory") == {"reservation_id": "r-1"}
+    assert recorder.execute_output(order_id, "fraud") is None
+
+
+async def test_a_rejection_compensates_and_the_last_undo_fails_the_order(recorded):
+    order_id, read, now = recorded
+    start(order_id, "inventory", "execute", 1, now)
+    recorder.succeed(order_id, PLAN, 0, "execute", 1, None, now)
+    start(order_id, "fraud", "execute", 1, now)
+    recorder.fail(order_id, "fraud", "execute", 1, Outcome.REJECTED, "no", now)
+    compensating, _ = await read()
+    start(order_id, "fraud", "undo", 1, now)
+    recorder.succeed(order_id, PLAN, 1, "undo", 1, None, now)
+    start(order_id, "inventory", "undo", 1, now)
+    recorder.succeed(order_id, PLAN, 0, "undo", 1, None, now)
+
+    order, attempts = await read()
+
+    assert (compensating.state, compensating.current_stage) == (OrderState.COMPENSATING, "fraud")
+    assert (order.state, order.terminal_reason) == (OrderState.FAILED, "fraud rejected: no")
+    assert [(a.stage, a.kind) for a in attempts][-2:] == [("fraud", "undo"), ("inventory", "undo")]
+
+
+async def test_an_undo_that_gives_up_ends_in_compensation_failed_with_both_reasons(recorded):
+    order_id, read, now = recorded
+    start(order_id, "fraud", "execute", 1, now)
+    recorder.fail(order_id, "fraud", "execute", 1, Outcome.REJECTED, "no", now)
+    start(order_id, "fraud", "undo", 3, now)
+    recorder.fail(order_id, "fraud", "undo", 3, Outcome.EXHAUSTED, "stuck", now)
+
+    order, _ = await read()
+
+    assert order.state is OrderState.COMPENSATION_FAILED
+    assert order.terminal_reason == "fraud rejected: no; undo of fraud exhausted: stuck"

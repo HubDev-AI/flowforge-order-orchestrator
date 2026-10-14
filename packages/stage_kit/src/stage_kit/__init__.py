@@ -1,6 +1,5 @@
 from stage_kit.handler import StageHandler
-from stage_kit.runner import StageRunner
 from stage_kit.settings import StageSettings
 from stage_kit.simulator import Profile, Simulator
 
-__all__ = ["Profile", "Simulator", "StageHandler", "StageRunner", "StageSettings"]
+__all__ = ["Profile", "Simulator", "StageHandler", "StageSettings"]
