@@ -15,7 +15,7 @@ SHIPPED_STAGES = '["inventory", "fraud", "shipping"]'
 TERMINAL_STATES = {"completed", "failed", "compensation_failed"}
 
 OVERRIDES = {
-    "fraud": {"max_attempts": 6, "dispatch_deadline_seconds": 5},
+    "fraud": {"max_attempts": 6, "deadline_seconds": 5},
     "shipping": {"backoff_base_seconds": 8},
 }
 

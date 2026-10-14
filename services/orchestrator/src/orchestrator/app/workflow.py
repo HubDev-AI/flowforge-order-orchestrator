@@ -35,7 +35,7 @@ def plan_for(order: Order, config: PipelineConfig) -> list[dict[str, Any]]:
                     "max_attempts": policy.max_attempts,
                     "backoff_base_seconds": policy.backoff_base.total_seconds(),
                     "backoff_cap_seconds": policy.backoff_cap.total_seconds(),
-                    "deadline_seconds": policy.dispatch_deadline.total_seconds(),
+                    "deadline_seconds": policy.deadline.total_seconds(),
                     "max_wait_seconds": policy.max_wait.total_seconds(),
                 },
             }
