@@ -1,6 +1,6 @@
 # Design record
 
-How the order orchestrator is built and why. The planning record, with the full requirement list and acceptance examples, is [`docs/plans/2026-10-13-1425-feat-async-order-orchestrator-plan.md`](plans/2026-10-13-1425-feat-async-order-orchestrator-plan.md); the brief is [`brief.md`](brief.md). This file records the current design, the decisions, the alternatives that were rejected, and the evaluation that led to running the stages on Dramatiq ([`library-evaluation.md`](library-evaluation.md)).
+How the order orchestrator is built and why. This file records the current design, the decisions, the alternatives that were rejected, and the evaluation that led to running the stages on Dramatiq.
 
 ## Shape of the system
 
@@ -88,7 +88,7 @@ Stages can be slow, fail, or be down. The policy treats those differently:
 
 ## Building on a task library
 
-The first version of this system had its own dispatcher: a loop that claimed due orders from Postgres, published one command per attempt, timed out attempts whose deadline passed, and recorded results. The architect then built the same system on Celery and on Dramatiq, keeping the API, the page, the history, and the stage code, and ran the same end-to-end suite against each. The record of that comparison is [`library-evaluation.md`](library-evaluation.md). In short:
+The first version of this system had its own dispatcher: a loop that claimed due orders from Postgres, published one command per attempt, timed out attempts whose deadline passed, and recorded results. The architect then built the same system on Celery and on Dramatiq, keeping the API, the page, the history, and the stage code, and ran the same end-to-end suite against each. In short:
 
 - **Both libraries ran the happy path, retries, compensation, and every restart scenario.** Each cut about a third of the production code.
 - **Both failed one scenario the same way.** With a stage down, its work waited in the queue and the order showed `running` with no attempt. The first version's policy timed out attempts during the outage; a task library has no clock running while no worker consumes.
