@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
-from contracts import Command, CommandKind, Outcome, OutcomeScript, Result
+from contracts import Command, CommandKind, Outcome, OutcomeScript
 from pydantic import ValidationError
 
 ORDER_ID = uuid4()
@@ -50,32 +50,6 @@ def test_execute_command_carries_no_prior_stage_output():
     assert make_command().prior_stage_output is None
     with pytest.raises(ValidationError, match="prior_stage_output"):
         make_command(prior_stage_output={"reservation_id": "r-1"})
-
-
-def test_result_round_trips_with_outcome_and_stage_output():
-    result = Result(
-        order_id=ORDER_ID,
-        stage="inventory",
-        attempt=2,
-        kind=CommandKind.EXECUTE,
-        outcome=Outcome.SUCCEEDED,
-        stage_output={"reservation_id": "r-1"},
-    )
-
-    assert Result.model_validate_json(result.model_dump_json()) == result
-
-
-def test_result_rejects_unknown_outcome():
-    payload = {
-        "order_id": str(ORDER_ID),
-        "stage": "fraud",
-        "attempt": 1,
-        "kind": "execute",
-        "outcome": "exploded",
-    }
-
-    with pytest.raises(ValidationError, match="outcome"):
-        Result.model_validate(payload)
 
 
 def test_outcomes_match_the_status_contract():

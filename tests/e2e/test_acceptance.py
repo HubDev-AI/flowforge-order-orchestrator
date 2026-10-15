@@ -1,6 +1,8 @@
 import httpx
 import pytest
 
+from .conftest import OVERRIDES
+
 pytestmark = pytest.mark.e2e
 
 EXECUTE, UNDO = "execute", "undo"
@@ -107,31 +109,46 @@ def test_a_stage_that_answers_after_its_deadline_is_timed_out_and_retried(orders
     ]
 
 
-def test_only_the_live_attempt_runs_when_a_stage_comes_back_after_timeouts(stack, orders):
+def test_a_stage_that_is_down_holds_the_order_visibly_until_it_returns(stack, orders):
     stack.compose("stop", "stage-fraud")
     try:
         order_id = orders.start()
-        orders.wait_until(
-            order_id,
-            lambda s: (
-                [a["outcome"] for a in s["attempts"] if a["stage"] == "fraud"][:2]
-                == ["timed_out", "timed_out"]
-            ),
-        )
+        waiting = orders.wait_until(order_id, lambda s: s["waiting_for_worker_since"] is not None)
+        assert (waiting["state"], waiting["current_stage"]) == ("running", "fraud")
+        assert [a["stage"] for a in waiting["attempts"]] == ["inventory"]
     finally:
         stack.compose("start", "stage-fraud")
 
     done = orders.finish(order_id)
 
     assert done["state"] == "completed"
-    fraud = [a for a in done["attempts"] if a["stage"] == "fraud"]
-    assert [a["outcome"] for a in fraud] == ["timed_out", "timed_out", "succeeded"]
-    lines = [line for line in stack.logs("stage-fraud").splitlines() if order_id in line]
-    dropped = [line for line in lines if "dropped expired" in line]
-    ran = [line for line in lines if line not in dropped]
-    assert len(dropped) == 2
-    assert len(ran) == 1
-    assert "attempt 3: succeeded" in ran[0]
+    assert orders.history(done) == [
+        ("inventory", EXECUTE, 1, "succeeded"),
+        ("fraud", EXECUTE, 1, "succeeded"),
+        ("shipping", EXECUTE, 1, "succeeded"),
+    ]
+
+
+def test_a_stage_down_longer_than_its_max_wait_gives_the_order_up(stack, orders, default_config):
+    fraud = {**OVERRIDES["fraud"], "max_wait_seconds": 8}
+    stack.configure(overrides={**OVERRIDES, "fraud": fraud})
+    stack.restart("orchestrator")
+    stack.compose("stop", "stage-fraud")
+    try:
+        order_id = orders.start()
+        done = orders.finish(order_id, timeout=60)
+    finally:
+        stack.compose("start", "stage-fraud")
+
+    assert done["state"] == "failed"
+    assert done["terminal_reason"] == "fraud unavailable: no worker took it within 8 s"
+    assert orders.history(done) == [
+        ("inventory", EXECUTE, 1, "succeeded"),
+        ("inventory", UNDO, 1, "succeeded"),
+    ]
+    dropped = f"dropped execute of order {order_id} fraud"
+    orders.wait_until_logged(stack, "stage-fraud", dropped)
+    assert f"order {order_id} fraud execute attempt" not in stack.logs("stage-fraud")
 
 
 def test_the_page_for_an_unknown_order_has_its_not_found_message(stack, orders):

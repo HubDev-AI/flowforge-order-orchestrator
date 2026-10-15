@@ -50,6 +50,7 @@ services:
     build:
       context: .
       target: orchestrator
+    image: flowforge-orchestrator:dev
     restart: unless-stopped
     depends_on:
       postgres:
@@ -79,6 +80,20 @@ services:
       interval: 3s
       timeout: 5s
       retries: 30
+
+  recorder:
+    build:
+      context: .
+      target: orchestrator
+    image: flowforge-orchestrator:dev
+    restart: unless-stopped
+    command: ["dramatiq", "orchestrator.recorder", "--processes", "1", "--threads", "1", "--queues", "orchestrator.records"]
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    environment:
+      RABBITMQ_URL: *rabbitmq-url
+      DATABASE_URL: postgresql://flowforge:flowforge@postgres:5432/flowforge
 
   stage-inventory:
     <<: *stage

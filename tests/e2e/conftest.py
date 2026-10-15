@@ -15,7 +15,7 @@ SHIPPED_STAGES = '["inventory", "fraud", "shipping"]'
 TERMINAL_STATES = {"completed", "failed", "compensation_failed"}
 
 OVERRIDES = {
-    "fraud": {"max_attempts": 6, "dispatch_deadline_seconds": 5},
+    "fraud": {"max_attempts": 6, "deadline_seconds": 5},
     "shipping": {"backoff_base_seconds": 8},
 }
 
@@ -129,6 +129,15 @@ class Orders:
 
     def finish(self, order_id: str, timeout: float = 90) -> dict:
         return self.wait_until(order_id, lambda s: s["state"] in TERMINAL_STATES, timeout)
+
+    @staticmethod
+    def wait_until_logged(stack: Stack, service: str, text: str, timeout: float = 30) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if text in stack.logs(service):
+                return
+            time.sleep(0.5)
+        raise TimeoutError(f"{service} never logged {text!r}")
 
     @staticmethod
     def history(status: dict) -> list[tuple]:

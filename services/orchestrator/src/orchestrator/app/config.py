@@ -21,14 +21,8 @@ class RetrySettings(BaseModel):
     max_attempts: int = Field(ge=1)
     backoff_base_seconds: float = Field(gt=0)
     backoff_cap_seconds: float = Field(gt=0)
-    dispatch_deadline_seconds: float = Field(gt=0)
-
-
-class SweepSettings(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    interval_seconds: float = Field(gt=0)
-    pending_threshold_seconds: float = Field(ge=0)
+    deadline_seconds: float = Field(gt=0)
+    max_wait_seconds: float = Field(gt=0)
 
 
 class AdapterSettings(BaseModel):
@@ -44,7 +38,6 @@ class PipelineConfig(BaseModel):
     stages: list[str] = Field(min_length=1)
     defaults: RetrySettings
     overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    sweep: SweepSettings
     adapters: AdapterSettings
 
     @field_validator("stages")
@@ -72,7 +65,8 @@ class PipelineConfig(BaseModel):
             max_attempts=settings.max_attempts,
             backoff_base=timedelta(seconds=settings.backoff_base_seconds),
             backoff_cap=timedelta(seconds=settings.backoff_cap_seconds),
-            dispatch_deadline=timedelta(seconds=settings.dispatch_deadline_seconds),
+            deadline=timedelta(seconds=settings.deadline_seconds),
+            max_wait=timedelta(seconds=settings.max_wait_seconds),
         )
 
     def _settings_for(self, stage: str) -> RetrySettings:

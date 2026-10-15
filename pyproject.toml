@@ -7,7 +7,6 @@ dependencies = []
 [dependency-groups]
 dev = [
     "flowforge-contracts",
-    "flowforge-bus",
     "flowforge-stage-kit",
     "flowforge-orchestrator",
     "flowforge-stage",
@@ -26,7 +25,6 @@ members = ["packages/*", "services/*"]
 
 [tool.uv.sources]
 flowforge-contracts = { workspace = true }
-flowforge-bus = { workspace = true }
 flowforge-stage-kit = { workspace = true }
 flowforge-orchestrator = { workspace = true }
 flowforge-stage = { workspace = true }
